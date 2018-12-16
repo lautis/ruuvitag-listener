@@ -6,3 +6,7 @@ license = "MIT"
 authors = ["Ville Lautanala <lautis@gmail.com>"]
 repository = "https://github.com/lautis/ruuvitag-listener"
 keywords = ["ruuvi", "ruuvitag", "telegraf"]
+
+[dependencies]
+rumble = "0.2.1"
+ruuvi-sensor-protocol = "0.2.0"
