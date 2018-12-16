@@ -12,7 +12,8 @@ The output could be e.g. piped to [Telegraf Socket Listener](https://github.com/
 
 ```sh
 cargo install
-sudo ruuvitag-listener
+sudo setcap 'cap_net_raw,cap_net_admin+eip' `which ruuvitag-listener`
+ruuvitag-listener
 ```
 
 Running `ruuvitag-listener` will output measurements to STDOUT until interrupted.
