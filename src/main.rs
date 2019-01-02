@@ -2,6 +2,7 @@ extern crate rumble;
 extern crate ruuvi_sensor_protocol;
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::time::SystemTime;
 
 pub mod ruuvi;
@@ -67,6 +68,12 @@ fn to_data_point(measurement: &Measurement) -> DataPoint {
 
 fn main() {
     on_measurement(Box::new(move |measurement| {
-        println!("{}", to_data_point(&measurement))
+        match writeln!(std::io::stdout(), "{}", to_data_point(&measurement)) {
+            Ok(_) => (),
+            Err(error) => {
+                eprintln!("error: {}", error);
+                ::std::process::exit(1);
+            }
+        }
     }));
 }

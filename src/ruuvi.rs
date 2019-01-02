@@ -2,7 +2,7 @@ use rumble::api::{BDAddr, Central, CentralEvent, Peripheral};
 use rumble::bluez::adapter::ConnectedAdapter;
 use rumble::bluez::manager::Manager;
 use ruuvi_sensor_protocol::{ParseError, SensorValues};
-use std::println;
+use std::eprintln;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -45,7 +45,7 @@ fn on_event_with_address(
             Err(error) => Some(Err(error)),
         },
         None => {
-            println!("Unknown device");
+            eprintln!("Unknown device");
             None
         }
     }
