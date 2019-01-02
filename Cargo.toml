@@ -10,3 +10,7 @@ keywords = ["ruuvi", "ruuvitag", "telegraf"]
 [dependencies]
 rumble = "0.2.1"
 ruuvi-sensor-protocol = "0.2.0"
+
+[profile.release]
+opt-level = "s"
+lto = true

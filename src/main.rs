@@ -11,6 +11,11 @@ use ruuvi::{on_measurement, Measurement};
 pub mod influxdb;
 use influxdb::{DataPoint, FieldValue};
 
+use std::alloc::System;
+
+#[global_allocator]
+static GLOBAL: System = System;
+
 fn tag_set(measurement: &Measurement) -> BTreeMap<String, String> {
     let mut tags = BTreeMap::new();
     tags.insert("name".to_string(), measurement.address.to_string());
