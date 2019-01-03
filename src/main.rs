@@ -22,13 +22,16 @@ fn tag_set(measurement: &Measurement) -> BTreeMap<String, String> {
     tags
 }
 
+macro_rules! to_float {
+    ( $value: expr, $scale: expr ) => {{
+        FieldValue::FloatValue(f64::from($value) / $scale)
+    }};
+}
+
 macro_rules! add_value {
     ( $fields: ident, $value: expr, $field: expr, $scale: expr ) => {{
         if let Some(value) = $value {
-            $fields.insert(
-                $field.to_string(),
-                FieldValue::FloatValue(f64::from(value) / $scale),
-            );
+            $fields.insert($field.to_string(), to_float!(value, $scale));
         }
     }};
 }
@@ -59,6 +62,22 @@ fn field_set(measurement: &Measurement) -> BTreeMap<String, FieldValue> {
         "battery_potential",
         1000.0
     );
+
+    if let Some(ref acceleration) = measurement.sensor_values.acceleration {
+        fields.insert(
+            "acceleration_x".to_string(),
+            to_float!(acceleration.0, 1000.0),
+        );
+        fields.insert(
+            "acceleration_y".to_string(),
+            to_float!(acceleration.1, 1000.0),
+        );
+        fields.insert(
+            "acceleration_z".to_string(),
+            to_float!(acceleration.2, 1000.0),
+        );
+    }
+
     fields
 }
 
