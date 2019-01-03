@@ -1,0 +1,10 @@
+[Unit]
+Description = Run Telegraf with RuuviTag configuration
+After=network.target
+
+[Service]
+ExecStart = telegraf --config /etc/telegraf/ruuvitag.conf
+Restart = always
+
+[Install]
+WantedBy=default.target
