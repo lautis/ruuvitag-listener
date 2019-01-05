@@ -18,9 +18,16 @@ use std::alloc::System;
 #[global_allocator]
 static GLOBAL: System = System;
 
-fn tag_set(measurement: &Measurement) -> BTreeMap<String, String> {
+fn tag_set(
+    aliases: &BTreeMap<String, String>,
+    measurement: &Measurement,
+) -> BTreeMap<String, String> {
     let mut tags = BTreeMap::new();
-    tags.insert("name".to_string(), measurement.address.to_string());
+    let address = measurement.address.to_string();
+    tags.insert(
+        "name".to_string(),
+        aliases.get(&address).unwrap_or(&address).to_string(),
+    );
     tags
 }
 
@@ -83,13 +90,45 @@ fn field_set(measurement: &Measurement) -> BTreeMap<String, FieldValue> {
     fields
 }
 
-fn to_data_point(name: String, measurement: &Measurement) -> DataPoint {
+fn to_data_point(
+    aliases: &BTreeMap<String, String>,
+    name: String,
+    measurement: &Measurement,
+) -> DataPoint {
     DataPoint {
         measurement: name,
-        tag_set: tag_set(&measurement),
+        tag_set: tag_set(aliases, &measurement),
         field_set: field_set(&measurement),
         timestamp: Some(SystemTime::now()),
     }
+}
+
+#[derive(Debug)]
+pub struct Alias {
+    pub address: String,
+    pub name: String,
+}
+
+fn parse_alias(src: &str) -> Result<Alias, &str> {
+    let index = src.find('=');
+    match index {
+        Some(i) => {
+            let (address, name) = src.split_at(i);
+            Ok(Alias {
+                address: address.to_string(),
+                name: name.get(1..).unwrap_or("").to_string(),
+            })
+        }
+        None => Err("invalid alias"),
+    }
+}
+
+fn alias_map(aliases: &[Alias]) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    for alias in aliases.iter() {
+        map.insert(alias.address.to_string(), alias.name.to_string());
+    }
+    map
 }
 
 #[derive(Debug, StructOpt)]
@@ -98,15 +137,19 @@ struct Options {
     #[structopt(long, default_value = "ruuvi_measurement")]
     /// The name of the measurement in InfluxDB line protocol.
     influxdb_measurement: String,
+    #[structopt(long, parse(try_from_str = "parse_alias"))]
+    /// Specify human-readable alias for RuuviTag id. For example --alias DE:AD:BE:EF:00:00=Sauna.
+    alias: Vec<Alias>,
 }
 
 fn listen(options: Options) {
     let name = options.influxdb_measurement;
+    let aliases = alias_map(&options.alias);
     on_measurement(Box::new(move |measurement| {
         match writeln!(
             std::io::stdout(),
             "{}",
-            to_data_point(name.to_string(), &measurement)
+            to_data_point(&aliases, name.to_string(), &measurement)
         ) {
             Ok(_) => (),
             Err(error) => {

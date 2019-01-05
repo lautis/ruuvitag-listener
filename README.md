@@ -33,7 +33,6 @@ ruuvi_measurement,name=F7:2A:60:0D:6E:1E battery_potential=3.007,humidity=19.5,p
 ## TODO
 
 * Pre-built binaries
-* Aliases for RuuviTags
 
 ## License
 
