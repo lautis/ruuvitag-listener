@@ -83,18 +83,31 @@ fn field_set(measurement: &Measurement) -> BTreeMap<String, FieldValue> {
     fields
 }
 
-fn to_data_point(measurement: &Measurement) -> DataPoint {
+fn to_data_point(name: String, measurement: &Measurement) -> DataPoint {
     DataPoint {
-        measurement: "ruuvi_measurement".to_string(),
+        measurement: name,
         tag_set: tag_set(&measurement),
         field_set: field_set(&measurement),
         timestamp: Some(SystemTime::now()),
     }
 }
 
-fn listen() {
+#[derive(Debug, StructOpt)]
+#[structopt(rename_all = "kebab-case")]
+struct Options {
+    #[structopt(long, default_value = "ruuvi_measurement")]
+    /// The name of the measurement in InfluxDB line protocol.
+    influxdb_measurement: String,
+}
+
+fn listen(options: Options) {
+    let name = options.influxdb_measurement;
     on_measurement(Box::new(move |measurement| {
-        match writeln!(std::io::stdout(), "{}", to_data_point(&measurement)) {
+        match writeln!(
+            std::io::stdout(),
+            "{}",
+            to_data_point(name.to_string(), &measurement)
+        ) {
             Ok(_) => (),
             Err(error) => {
                 eprintln!("error: {}", error);
@@ -104,11 +117,7 @@ fn listen() {
     }));
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt()]
-struct Opt {}
-
 fn main() {
-    Opt::from_args();
-    listen()
+    let options = Options::from_args();
+    listen(options)
 }
