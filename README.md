@@ -30,10 +30,6 @@ ruuvi_measurement,name=F1:FC:AA:80:4E:59 battery_potential=2.971,humidity=20,pre
 ruuvi_measurement,name=F7:2A:60:0D:6E:1E battery_potential=3.007,humidity=19.5,pressure=102.624,temperature=19.43 1544980434984969861
 ```
 
-## TODO
-
-* Pre-built binaries
-
 ## License
 
 MIT
