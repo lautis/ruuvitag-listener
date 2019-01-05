@@ -33,8 +33,8 @@ Copy these files to ~/.config/systemd/user` directory.
 Then enable the services:
 
 ```
-systemctl --user enable --now ruuvitag-listener.service
 systemctl --user enable --now ruuvitag-telegraf.service
+systemctl --user enable --now ruuvitag-listener.service
 ```
 
 This starts pushing metrics to InfluxDB every 10 seconds.
