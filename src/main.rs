@@ -1,9 +1,11 @@
 extern crate rumble;
 extern crate ruuvi_sensor_protocol;
+extern crate structopt;
 
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::time::SystemTime;
+use structopt::StructOpt;
 
 pub mod ruuvi;
 use ruuvi::{on_measurement, Measurement};
@@ -90,7 +92,7 @@ fn to_data_point(measurement: &Measurement) -> DataPoint {
     }
 }
 
-fn main() {
+fn listen() {
     on_measurement(Box::new(move |measurement| {
         match writeln!(std::io::stdout(), "{}", to_data_point(&measurement)) {
             Ok(_) => (),
@@ -100,4 +102,13 @@ fn main() {
             }
         }
     }));
+}
+
+#[derive(Debug, StructOpt)]
+#[structopt()]
+struct Opt {}
+
+fn main() {
+    Opt::from_args();
+    listen()
 }

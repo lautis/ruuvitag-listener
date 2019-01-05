@@ -1,6 +1,6 @@
 [package]
 name = "ruuvitag-listener"
-description = "Listen to RuuviTag measurements and output in Telegraf compatible format"
+description = "Print RuuviTag measurements in Telegraf compatible format"
 version = "0.2.0"
 license = "MIT"
 authors = ["Ville Lautanala <lautis@gmail.com>"]
@@ -10,6 +10,7 @@ keywords = ["ruuvi", "ruuvitag", "telegraf"]
 [dependencies]
 rumble = "0.3.*"
 ruuvi-sensor-protocol = "0.2.*"
+structopt = { version = "0.2", default-features = false }
 
 [profile.release]
 opt-level = "s"
