@@ -89,10 +89,11 @@ pub fn on_measurement(f: Box<Fn(Measurement) + Send>) {
     });
     central.on_event(on_event_closure);
 
-    // scan for tags, stop after 2 seconds
+    // scan for tags, reset after 60 seconds
     loop {
         central.start_scan().unwrap();
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(Duration::from_secs(60));
+
         central.stop_scan().unwrap();
     }
 }
