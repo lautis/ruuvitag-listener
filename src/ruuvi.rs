@@ -78,6 +78,8 @@ pub fn on_measurement(f: Box<Fn(Measurement) + Send>) {
 
     // connect to the adapter
     let central = Arc::new(adapter.connect().unwrap());
+    central.active(false);
+    central.filter_duplicates(false);
 
     let closure_central = central.clone();
     let on_event_closure = Box::new(move |event| match on_event(&closure_central, event) {

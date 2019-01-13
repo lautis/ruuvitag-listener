@@ -8,7 +8,7 @@ repository = "https://github.com/lautis/ruuvitag-listener"
 keywords = ["ruuvi", "ruuvitag", "telegraf"]
 
 [dependencies]
-rumble = "0.3.*"
+rumble = { git = "https://github.com/lautis/rumble", tag = "v0.3.0.ruuvitag-listener" }
 ruuvi-sensor-protocol = "0.2.*"
 structopt = { version = "0.2", default-features = false }
 
