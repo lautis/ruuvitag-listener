@@ -28,8 +28,12 @@ impl<T: Peripheral> ToSensorValue for T {
 }
 
 fn from_manufacturer_data(data: &[u8]) -> Result<SensorValues, ParseError> {
-    let id = u16::from(data[0]) + (u16::from(data[1]) << 8);
-    SensorValues::from_manufacturer_specific_data(id, &data[2..])
+    if data.len() > 2 {
+        let id = u16::from(data[0]) + (u16::from(data[1]) << 8);
+        SensorValues::from_manufacturer_specific_data(id, &data[2..])
+    } else {
+        Err(ParseError::EmptyValue)
+    }
 }
 
 fn on_event_with_address(
