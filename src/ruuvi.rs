@@ -69,19 +69,20 @@ fn on_event(
 }
 
 // Stream of RuuviTag measurements that gets passed to the given callback. Blocks and never stops.
-pub fn on_measurement(f: Box<Fn(Measurement) + Send>) {
-    let manager = Manager::new().unwrap();
+pub fn on_measurement(f: Box<Fn(Measurement) + Send>) -> Result<(), rumble::Error> {
+    let manager = Manager::new()?;
 
     // get bluetooth adapter
-    let adapters = manager.adapters().unwrap();
+    let adapters = manager.adapters()?;
+
     let mut adapter = adapters.into_iter().nth(0).unwrap();
 
     // clear out any errant state
-    adapter = manager.down(&adapter).unwrap();
-    adapter = manager.up(&adapter).unwrap();
+    adapter = manager.down(&adapter)?;
+    adapter = manager.up(&adapter)?;
 
     // connect to the adapter
-    let central = Arc::new(adapter.connect().unwrap());
+    let central = Arc::new(adapter.connect()?);
     central.active(false);
     central.filter_duplicates(false);
 
@@ -95,9 +96,9 @@ pub fn on_measurement(f: Box<Fn(Measurement) + Send>) {
 
     // scan for tags, reset after 60 seconds
     loop {
-        central.start_scan().unwrap();
+        central.start_scan()?;
         thread::sleep(Duration::from_secs(60));
 
-        central.stop_scan().unwrap();
+        central.stop_scan()?;
     }
 }

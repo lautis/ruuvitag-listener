@@ -142,7 +142,7 @@ struct Options {
     alias: Vec<Alias>,
 }
 
-fn listen(options: Options) {
+fn listen(options: Options) -> Result<(), rumble::Error> {
     let name = options.influxdb_measurement;
     let aliases = alias_map(&options.alias);
     on_measurement(Box::new(move |measurement| {
@@ -157,10 +157,16 @@ fn listen(options: Options) {
                 ::std::process::exit(1);
             }
         }
-    }));
+    }))
 }
 
 fn main() {
     let options = Options::from_args();
-    listen(options)
+    match listen(options) {
+        Ok(_) => std::process::exit(0x0),
+        Err(why) => {
+            eprintln!("error: {}", why);
+            std::process::exit(0x1);
+        }
+    }
 }
