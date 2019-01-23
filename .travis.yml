@@ -29,7 +29,7 @@ matrix:
 before_install:
   - set -e
   - sudo gem install fpm
-  - curl -sSLf https://raw.githubusercontent.com/dflemstr/rq/master/install.sh | bash -s -- -y
+  - sudo curl -o /usr/local/bin/rq https://s3-eu-west-1.amazonaws.com/record-query/record-query/x86_64-unknown-linux-gnu/rq
   - rustup self update
 
 install:
