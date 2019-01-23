@@ -27,7 +27,7 @@ matrix:
 before_install:
   - set -e
   - gem install fpm
-  - sudo curl -o /usr/local/bin/rq https://s3-eu-west-1.amazonaws.com/record-query/record-query/x86_64-unknown-linux-gnu/rq
+  - sudo curl -o /usr/local/bin/rq https://s3-eu-west-1.amazonaws.com/record-query/record-query/x86_64-unknown-linux-musl/rq
   - sudo chmod +x /usr/local/bin/rq
   - rustup self update
 
