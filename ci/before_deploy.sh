@@ -19,9 +19,11 @@ main() {
 
     cross build --target $TARGET --release
     cp target/$TARGET/release/ruuvitag-listener $stage/
+    $(dirname $(readlink -f "$0"))/fpm.sh target/$TARGET/release/ruuvitag-listener
 
     cd $stage
-    tar czf $src/$CRATE_NAME-$TRAVIS_TAG-$TARGET.tar.gz *
+    mkdir -p $src/output
+    tar czf $src/output/$CRATE_NAME-$TRAVIS_TAG-$TARGET.tar.gz *
     cd $src
 
     rm -rf $stage
