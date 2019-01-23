@@ -29,6 +29,7 @@ matrix:
 before_install:
   - set -e
   - sudo gem install fpm
+  - curl -sSLf https://raw.githubusercontent.com/dflemstr/rq/master/install.sh | bash -s -- -y
   - rustup self update
 
 install:
