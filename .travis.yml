@@ -36,11 +36,9 @@ install:
 
 script:
   - sh ci/script.sh
+  - sh ci/before_deploy.sh
 
 after_script: set +e
-
-before_deploy:
-  - sh ci/before_deploy.sh
 
 deploy:
   api_key:
