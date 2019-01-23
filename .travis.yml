@@ -4,11 +4,18 @@ sudo: required
 language: rust
 rust:
   - stable
+addons:
+  apt:
+    packages:
+    - xz-utils
+    - bsdtar
+    - ruby
+    - ruby-dev
+    - build-essential
 
 cache: cargo
 before_cache:
   - chmod -R a+r $HOME/.cargo
-
 
 env:
   global:
@@ -21,6 +28,7 @@ matrix:
 
 before_install:
   - set -e
+  - sudo gem install fpm
   - rustup self update
 
 install:

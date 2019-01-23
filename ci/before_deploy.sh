@@ -17,7 +17,7 @@ main() {
 
     test -f Cargo.lock || cargo generate-lockfile
 
-    cross build --target $TARGET --release
+    cross build --target $TARGET --release --locked
     cp target/$TARGET/release/ruuvitag-listener $stage/
 
     cd $stage
