@@ -323,7 +323,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "ruuvitag-listener"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "rumble 0.3.0 (git+https://github.com/lautis/rumble?tag=v0.3.0.ruuvitag-listener)",
  "ruuvi-sensor-protocol 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
