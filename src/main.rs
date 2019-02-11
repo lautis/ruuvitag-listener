@@ -4,6 +4,7 @@ extern crate structopt;
 
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::panic::{self, PanicInfo};
 use std::time::SystemTime;
 use structopt::StructOpt;
 
@@ -161,6 +162,10 @@ fn listen(options: Options) -> Result<(), rumble::Error> {
 }
 
 fn main() {
+    panic::set_hook(Box::new(move |info: &PanicInfo| {
+        eprintln!("Panic! {}", info);
+        std::process::exit(0x2);
+    }));
     let options = Options::from_args();
     match listen(options) {
         Ok(_) => std::process::exit(0x0),
