@@ -4,14 +4,6 @@ sudo: required
 language: rust
 rust:
   - stable
-addons:
-  apt:
-    packages:
-    - xz-utils
-    - bsdtar
-    - ruby
-    - ruby-dev
-    - build-essential
 
 cache: cargo
 before_cache:
