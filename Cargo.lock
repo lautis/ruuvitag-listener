@@ -291,7 +291,7 @@ dependencies = [
 [[package]]
 name = "rumble"
 version = "0.3.0"
-source = "git+https://github.com/lautis/rumble?tag=v0.3.0.ruuvitag-listener#9239df830cbdab633f26d3bfb13b8fb06e702398"
+source = "git+https://github.com/lautis/rumble?tag=v0.3.0.ruuvitag-listener.1#c5c819cae6f06841e365d76f65c5f9db4a16414d"
 dependencies = [
  "backtrace 0.3.13 (registry+https://github.com/rust-lang/crates.io-index)",
  "bitflags 1.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -325,7 +325,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 name = "ruuvitag-listener"
 version = "0.3.4"
 dependencies = [
- "rumble 0.3.0 (git+https://github.com/lautis/rumble?tag=v0.3.0.ruuvitag-listener)",
+ "rumble 0.3.0 (git+https://github.com/lautis/rumble?tag=v0.3.0.ruuvitag-listener.1)",
  "ruuvi-sensor-protocol 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "structopt 0.2.14 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
@@ -464,7 +464,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum rand_core 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)" = "7a6fdeb83b075e8266dcc8762c22776f6877a63111121f5f8c7411e5be7eed4b"
 "checksum rand_core 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)" = "d0e7a549d590831370895ab7ba4ea0c1b6b011d106b5ff2da6eee112615e6dc0"
 "checksum rdrand 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)" = "678054eb77286b51581ba43620cc911abf02758c91f93f479767aed0f90458b2"
-"checksum rumble 0.3.0 (git+https://github.com/lautis/rumble?tag=v0.3.0.ruuvitag-listener)" = "<none>"
+"checksum rumble 0.3.0 (git+https://github.com/lautis/rumble?tag=v0.3.0.ruuvitag-listener.1)" = "<none>"
 "checksum rustc-demangle 0.1.13 (registry+https://github.com/rust-lang/crates.io-index)" = "adacaae16d02b6ec37fdc7acfcddf365978de76d1983d3ee22afc260e1ca9619"
 "checksum rustc-serialize 0.3.24 (registry+https://github.com/rust-lang/crates.io-index)" = "dcf128d1287d2ea9d80910b5f1120d0b8eede3fbf1abe91c40d39ea7d51e6fda"
 "checksum ruuvi-sensor-protocol 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)" = "b38a30b73b0026108461048353bdb06db808cb9abf878915afa8f97b7ec1e0ed"
