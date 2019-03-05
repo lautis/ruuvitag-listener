@@ -69,7 +69,9 @@ fn on_event(
 }
 
 // Stream of RuuviTag measurements that gets passed to the given callback. Blocks and never stops.
-pub fn on_measurement(f: Box<Fn(Measurement) + Send>) -> Result<(), rumble::Error> {
+pub fn on_measurement(
+    f: Box<Fn(Result<Measurement, ParseError>) + Send>,
+) -> Result<(), rumble::Error> {
     let manager = Manager::new()?;
 
     // get bluetooth adapter
@@ -87,10 +89,10 @@ pub fn on_measurement(f: Box<Fn(Measurement) + Send>) -> Result<(), rumble::Erro
     central.filter_duplicates(false);
 
     let closure_central = central.clone();
-    let on_event_closure = Box::new(move |event| match on_event(&closure_central, event) {
-        Some(Ok(value)) => f(value),
-        Some(Err(_)) => {}
-        None => {}
+    let on_event_closure = Box::new(move |event| {
+        if let Some(result) = on_event(&closure_central, event) {
+            f(result)
+        }
     });
     central.on_event(on_event_closure);
 

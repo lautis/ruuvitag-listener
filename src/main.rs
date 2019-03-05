@@ -141,21 +141,34 @@ struct Options {
     #[structopt(long, parse(try_from_str = "parse_alias"))]
     /// Specify human-readable alias for RuuviTag id. For example --alias DE:AD:BE:EF:00:00=Sauna.
     alias: Vec<Alias>,
+    /// Verbose output, print parse errors for unrecognized data
+    #[structopt(short = "v", long = "verbose")]
+    verbose: bool,
+}
+
+fn print_result(aliases: &BTreeMap<String, String>, name: &str, measurement: Measurement) {
+    match writeln!(
+        std::io::stdout(),
+        "{}",
+        to_data_point(&aliases, name.to_string(), &measurement)
+    ) {
+        Ok(_) => (),
+        Err(error) => {
+            eprintln!("error: {}", error);
+            ::std::process::exit(1);
+        }
+    }
 }
 
 fn listen(options: Options) -> Result<(), rumble::Error> {
     let name = options.influxdb_measurement;
     let aliases = alias_map(&options.alias);
-    on_measurement(Box::new(move |measurement| {
-        match writeln!(
-            std::io::stdout(),
-            "{}",
-            to_data_point(&aliases, name.to_string(), &measurement)
-        ) {
-            Ok(_) => (),
-            Err(error) => {
-                eprintln!("error: {}", error);
-                ::std::process::exit(1);
+    let verbose = options.verbose;
+    on_measurement(Box::new(move |result| match result {
+        Ok(measurement) => print_result(&aliases, &name, measurement),
+        Err(error) => {
+            if verbose {
+                eprintln!("{}", error)
             }
         }
     }))
