@@ -19,8 +19,6 @@ matrix:
     - env: TARGET=x86_64-unknown-linux-gnu
 
 before_install:
-  - set -e
-  - sudo gem install fpm
   - rustup self update
 
 install:
