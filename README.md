@@ -33,7 +33,7 @@ ruuvi_measurement,name=F1:FC:AA:80:4E:59 acceleration_x=0.002,acceleration_y=0.0
 ruuvi_measurement,name=F7:2A:60:0D:6E:1E acceleration_x=-0.052,acceleration_y=-0.032,acceleration_z=1,battery_potential=3.013,humidity=19.5,pressure=101.481,temperature=19.63 1546681655691300729
 ```
 
-You can also define the InfluDB measuremeent name or aliases using command line arguments. For example
+You can also define the InfluxDB measuremeent name or aliases using command line arguments. For example
 
 ```sh
 ruuvitag-listener --influxdb-measurement=ruuvi --alias F1:FC:AA:80:4E:59=Indoor --alias F7:2A:60:0D:6E:1E=Outdoor
