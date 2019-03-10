@@ -155,6 +155,7 @@ fn print_result(aliases: &BTreeMap<String, String>, name: &str, measurement: Mea
         Ok(_) => (),
         Err(error) => {
             eprintln!("error: {}", error);
+            eprintln!("Did you remember to run setcap after installation?");
             ::std::process::exit(1);
         }
     }
