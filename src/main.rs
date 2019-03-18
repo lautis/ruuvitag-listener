@@ -14,6 +14,7 @@ use ruuvi::{on_measurement, Measurement};
 pub mod influxdb;
 use influxdb::{DataPoint, FieldValue};
 
+use rumble::Error::PermissionDenied;
 use std::alloc::System;
 
 #[global_allocator]
@@ -155,7 +156,6 @@ fn print_result(aliases: &BTreeMap<String, String>, name: &str, measurement: Mea
         Ok(_) => (),
         Err(error) => {
             eprintln!("error: {}", error);
-            eprintln!("Did you remember to run setcap after installation?");
             ::std::process::exit(1);
         }
     }
@@ -184,7 +184,10 @@ fn main() {
     match listen(options) {
         Ok(_) => std::process::exit(0x0),
         Err(why) => {
-            eprintln!("error: {}", why);
+            match why {
+                PermissionDenied => println!("error: Permission Denied. Have you run setcap?"),
+                _ => eprintln!("error: {}", why),
+            }
             std::process::exit(0x1);
         }
     }
