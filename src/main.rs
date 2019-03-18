@@ -14,6 +14,7 @@ use ruuvi::{on_measurement, Measurement};
 pub mod influxdb;
 use influxdb::{DataPoint, FieldValue};
 
+use rumble::Error::PermissionDenied;
 use std::alloc::System;
 
 #[global_allocator]
@@ -183,7 +184,10 @@ fn main() {
     match listen(options) {
         Ok(_) => std::process::exit(0x0),
         Err(why) => {
-            eprintln!("error: {}", why);
+            match why {
+                PermissionDenied => println!("error: Permission Denied. Have you run setcap?"),
+                _ => eprintln!("error: {}", why),
+            }
             std::process::exit(0x1);
         }
     }
