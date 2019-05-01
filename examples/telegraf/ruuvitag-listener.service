@@ -4,7 +4,7 @@ After=ruuvitag-telegraf.service
 Wants=ruuvitag-telegraf.service
 
 [Service]
-ExecStart = /bin/sh -c 'ruuvitag-listener | netcat -U /tmp/telegraf-ruuvitag.sock'
+ExecStart = /bin/sh -c 'ruuvitag-listener | netcat -q0 -U /tmp/telegraf-ruuvitag.sock'
 Restart = always
 
 [Install]
