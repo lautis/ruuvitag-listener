@@ -15,10 +15,6 @@ pub mod influxdb;
 use influxdb::{DataPoint, FieldValue};
 
 use rumble::Error::PermissionDenied;
-use std::alloc::System;
-
-#[global_allocator]
-static GLOBAL: System = System;
 
 fn tag_set(
     aliases: &BTreeMap<String, String>,
