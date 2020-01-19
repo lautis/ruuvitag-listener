@@ -134,12 +134,12 @@ fn alias_map(aliases: &[Alias]) -> BTreeMap<String, String> {
 }
 
 #[derive(Debug, StructOpt)]
-#[structopt(rename_all = "kebab-case")]
+#[structopt(author, about, rename_all = "kebab-case")]
 struct Options {
     #[structopt(long, default_value = "ruuvi_measurement")]
     /// The name of the measurement in InfluxDB line protocol.
     influxdb_measurement: String,
-    #[structopt(long, parse(try_from_str = "parse_alias"))]
+    #[structopt(long, parse(try_from_str = parse_alias))]
     /// Specify human-readable alias for RuuviTag id. For example --alias DE:AD:BE:EF:00:00=Sauna.
     alias: Vec<Alias>,
     /// Verbose output, print parse errors for unrecognized data
