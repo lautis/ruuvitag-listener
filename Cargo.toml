@@ -10,7 +10,7 @@ edition = "2018"
 
 [dependencies]
 rumble = { git = "https://github.com/lautis/rumble", tag = "v0.3.0.ruuvitag-listener.3" }
-ruuvi-sensor-protocol = "0.3.*"
+ruuvi-sensor-protocol = "0.4.*"
 structopt = { version = "0.2", default-features = false }
 
 [profile.release]

@@ -8,6 +8,9 @@ use std::panic::{self, PanicInfo};
 use std::time::SystemTime;
 use structopt::StructOpt;
 
+use crate::ruuvi_sensor_protocol::{
+    Acceleration, BatteryPotential, Humidity, Pressure, Temperature,
+};
 pub mod ruuvi;
 use ruuvi::{on_measurement, Measurement};
 
@@ -47,30 +50,30 @@ fn field_set(measurement: &Measurement) -> BTreeMap<String, FieldValue> {
     let mut fields = BTreeMap::new();
     add_value!(
         fields,
-        measurement.sensor_values.temperature,
+        measurement.sensor_values.temperature_as_millicelsius(),
         "temperature",
         1000.0
     );
     add_value!(
         fields,
-        measurement.sensor_values.humidity,
+        measurement.sensor_values.humidity_as_ppm(),
         "humidity",
         10000.0
     );
     add_value!(
         fields,
-        measurement.sensor_values.pressure,
+        measurement.sensor_values.pressure_as_pascals(),
         "pressure",
         1000.0
     );
     add_value!(
         fields,
-        measurement.sensor_values.battery_potential,
+        measurement.sensor_values.battery_potential_as_millivolts(),
         "battery_potential",
         1000.0
     );
 
-    if let Some(ref acceleration) = measurement.sensor_values.acceleration {
+    if let Some(ref acceleration) = measurement.sensor_values.acceleration_vector_as_milli_g() {
         fields.insert(
             "acceleration_x".to_string(),
             to_float!(acceleration.0, 1000.0),

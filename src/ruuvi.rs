@@ -70,7 +70,7 @@ fn on_event(
 
 // Stream of RuuviTag measurements that gets passed to the given callback. Blocks and never stops.
 pub fn on_measurement(
-    f: Box<Fn(Result<Measurement, ParseError>) + Send>,
+    f: Box<dyn Fn(Result<Measurement, ParseError>) + Send>,
 ) -> Result<(), rumble::Error> {
     let manager = Manager::new()?;
 
