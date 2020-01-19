@@ -25,6 +25,7 @@ fn tag_set(
 ) -> BTreeMap<String, String> {
     let mut tags = BTreeMap::new();
     let address = measurement.address.to_string();
+    tags.insert("mac".to_string(), address.to_string());
     tags.insert(
         "name".to_string(),
         aliases.get(&address).unwrap_or(&address).to_string(),
