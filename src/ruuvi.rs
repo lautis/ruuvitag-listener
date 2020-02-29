@@ -1,6 +1,6 @@
-use rumble::api::{BDAddr, Central, CentralEvent, Peripheral};
-use rumble::bluez::adapter::ConnectedAdapter;
-use rumble::bluez::manager::Manager;
+use btleplug::api::{BDAddr, Central, CentralEvent, Peripheral};
+use btleplug::bluez::adapter::ConnectedAdapter;
+use btleplug::bluez::manager::Manager;
 use ruuvi_sensor_protocol::{ParseError, SensorValues};
 use std::eprintln;
 use std::sync::Arc;
@@ -71,7 +71,7 @@ fn on_event(
 // Stream of RuuviTag measurements that gets passed to the given callback. Blocks and never stops.
 pub fn on_measurement(
     f: Box<dyn Fn(Result<Measurement, ParseError>) + Send>,
-) -> Result<(), rumble::Error> {
+) -> Result<(), btleplug::Error> {
     let manager = Manager::new()?;
 
     // get bluetooth adapter
