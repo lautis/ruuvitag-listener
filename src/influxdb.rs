@@ -67,10 +67,12 @@ fn duration_as_nanos(duration: Duration) -> String {
 
 fn fmt_timestamp(data_point: &DataPoint, fmt: &mut fmt::Formatter) -> fmt::Result {
     match data_point.timestamp {
-        Some(time) => match time.duration_since(SystemTime::UNIX_EPOCH) {
-            Ok(duration) => write!(fmt, " {}", duration_as_nanos(duration)),
-            Err(_err) => panic!("Could not convert time to duration"),
-        },
+        Some(time) => {
+            let duration = time
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("Time went backwards");
+            write!(fmt, " {}", duration_as_nanos(duration))
+        }
         None => Ok(()),
     }
 }

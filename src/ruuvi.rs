@@ -77,7 +77,10 @@ pub fn on_measurement(
     // get bluetooth adapter
     let adapters = manager.adapters()?;
 
-    let mut adapter = adapters.into_iter().nth(0).expect("Bluetooth adapter not available");
+    let mut adapter = adapters
+        .into_iter()
+        .next()
+        .expect("Bluetooth adapter not available");
 
     // clear out any errant state
     adapter = manager.down(&adapter)?;
