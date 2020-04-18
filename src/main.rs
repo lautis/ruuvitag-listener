@@ -92,7 +92,7 @@ fn field_set(measurement: &Measurement) -> BTreeMap<String, FieldValue> {
     add_value!(
         fields,
         measurement.sensor_values.measurement_sequence_number(),
-        "measurement_number",
+        "measurement_sequence_number",
         1.0
     );
 
