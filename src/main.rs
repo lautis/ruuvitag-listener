@@ -88,6 +88,7 @@ fn field_set(measurement: &Measurement) -> BTreeMap<String, FieldValue> {
         "movement_counter",
         1.0
     );
+
     add_value!(
         fields,
         measurement.sensor_values.measurement_sequence_number(),
