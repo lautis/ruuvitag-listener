@@ -630,7 +630,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "ruuvitag-listener"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "btleplug 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "ruuvi-sensor-protocol 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
