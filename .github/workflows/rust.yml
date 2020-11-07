@@ -45,7 +45,6 @@ jobs:
         path: ruuvitag-listener.tar.gz
   crates_io_publish:
     name: Publish to crates.io
-    if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -62,8 +61,6 @@ jobs:
         CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
     - name: Dry run publish
       run: cargo publish --dry-run
-    - name: Publish
-      run: cargo publish
   create_release:
     name: Create release
     if: startsWith(github.ref, 'refs/tags/v')
