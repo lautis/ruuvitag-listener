@@ -4,7 +4,6 @@ use btleplug::bluez::manager::Manager;
 use ruuvi_sensor_protocol::{ParseError, SensorValues};
 use std::eprintln;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 // Measurement from RuuviTag sensor
@@ -92,18 +91,15 @@ pub fn on_measurement(
     central.filter_duplicates(false);
 
     let closure_central = central.clone();
-    let on_event_closure = Box::new(move |event| {
-        if let Some(result) = on_event(&closure_central, event) {
-            f(result)
-        }
-    });
-    central.on_event(on_event_closure);
+    let event_receiver = central.event_receiver().unwrap();
 
-    // scan for tags, reset after 60 seconds
     loop {
-        central.start_scan()?;
-        thread::sleep(Duration::from_secs(60));
-
+        central.start_scan().unwrap();
+        while let Ok(event) = event_receiver.recv_timeout(Duration::from_secs(60)) {
+            if let Some(result) = on_event(&closure_central, event) {
+                f(result)
+            }
+        }
         central.stop_scan()?;
     }
 }
