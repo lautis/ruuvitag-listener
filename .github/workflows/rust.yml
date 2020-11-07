@@ -18,16 +18,23 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
-    - name: Install cross
-      run: cargo install cross --force
-    - name: Build
-      run: |
-        cross build --target ${{ matrix.target }} --locked
-        cross build --target ${{ matrix.target }} --release --locked
-    - name: Run tests
-      run: |
-        cross test --target ${{ matrix.target }} --locked
-        cross test --target ${{ matrix.target }} --release --locked
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        profile: minimal
+        target: ${{ matrix.target }}
+        override: true
+    - uses: actions-rs/cargo@v1
+      with:
+        use-cross: true
+        command: build
+        args: --release --locked --target ${{ matrix.target }}
+    - uses: actions-rs/cargo@v1
+      with:
+        use-cross: true
+        command: test
+        args: --locked --target ${{ matrix.target }}
     - name: Tarball release
       run: |
         tar czf ruuvitag-listener.tar.gz -C target/${{ matrix.target }}/release/ ruuvitag-listener
