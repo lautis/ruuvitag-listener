@@ -15,11 +15,11 @@ pub struct Measurement {
 }
 
 trait ToSensorValue {
-    fn to_sensor_value(self: Self) -> Result<SensorValues, ParseError>;
+    fn to_sensor_value(self) -> Result<SensorValues, ParseError>;
 }
 
 impl<T: Peripheral> ToSensorValue for T {
-    fn to_sensor_value(self: Self) -> Result<SensorValues, ParseError> {
+    fn to_sensor_value(self) -> Result<SensorValues, ParseError> {
         match self.properties().manufacturer_data {
             Some(data) => from_manufacturer_data(&data),
             None => Err(ParseError::EmptyValue),
