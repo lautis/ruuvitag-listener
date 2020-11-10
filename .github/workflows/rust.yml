@@ -95,6 +95,8 @@ jobs:
         - armv7-unknown-linux-gnueabihf
         - x86_64-unknown-linux-gnu
     steps:
+    - id: vars
+      run: echo ::set-output name=version::${GITHUB_REF/refs\/tags\//}
     - uses: actions/download-artifact@v2
       with:
         name: ruuvitag-listener-${{ matrix.target }}.tar.gz
@@ -106,7 +108,7 @@ jobs:
       with:
         upload_url: ${{ needs.create_release.outputs.upload_url }}
         asset_path: ./ruuvitag-listener.tar.gz
-        asset_name: ruuvitag-listener-${{ github.ref }}-${{ matrix.target }}.tar.gz
+        asset_name: ruuvitag-listener-${{ steps.vars.outputs.version }}-${{ matrix.target }}.tar.gz
         asset_content_type: application/gzip
   rustfmt:
     runs-on: ubuntu-latest
