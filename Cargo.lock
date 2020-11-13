@@ -837,7 +837,7 @@ checksum = "9b1545dbc355565dca39614e0a06ea6419b846c5616e9b3ecbc1d082f4e4989d"
 
 [[package]]
 name = "ruuvitag-listener"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "btleplug",
  "ruuvi-sensor-protocol",
