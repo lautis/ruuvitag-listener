@@ -1,12 +1,12 @@
 extern crate btleplug;
-extern crate ruuvi_sensor_protocol;
 extern crate clap;
+extern crate ruuvi_sensor_protocol;
 
+use clap::Parser;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::panic::{self, PanicInfo};
 use std::time::SystemTime;
-use clap::Parser;
 
 use crate::ruuvi_sensor_protocol::{
     Acceleration, BatteryPotential, Humidity, MeasurementSequenceNumber, MovementCounter, Pressure,
