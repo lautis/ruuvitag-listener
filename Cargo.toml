@@ -6,7 +6,7 @@ license = "MIT"
 authors = ["Ville Lautanala <lautis@gmail.com>"]
 repository = "https://github.com/lautis/ruuvitag-listener"
 keywords = ["ruuvi", "ruuvitag", "telegraf"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 btleplug = "0.5.*"
