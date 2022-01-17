@@ -1,12 +1,12 @@
 extern crate btleplug;
 extern crate ruuvi_sensor_protocol;
-extern crate structopt;
+extern crate clap;
 
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::panic::{self, PanicInfo};
 use std::time::SystemTime;
-use structopt::StructOpt;
+use clap::Parser;
 
 use crate::ruuvi_sensor_protocol::{
     Acceleration, BatteryPotential, Humidity, MeasurementSequenceNumber, MovementCounter, Pressure,
@@ -133,7 +133,7 @@ pub struct Alias {
     pub name: String,
 }
 
-fn parse_alias(src: &str) -> Result<Alias, &str> {
+fn parse_alias(src: &str) -> Result<Alias, String> {
     let index = src.find('=');
     match index {
         Some(i) => {
@@ -143,7 +143,7 @@ fn parse_alias(src: &str) -> Result<Alias, &str> {
                 name: name.get(1..).unwrap_or("").to_string(),
             })
         }
-        None => Err("invalid alias"),
+        None => Err("invalid alias".to_string()),
     }
 }
 
@@ -155,17 +155,17 @@ fn alias_map(aliases: &[Alias]) -> BTreeMap<String, String> {
     map
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(author, about, rename_all = "kebab-case")]
+#[derive(Parser, Debug)]
+#[clap(author, about, rename_all = "kebab-case")]
 struct Options {
-    #[structopt(long, default_value = "ruuvi_measurement")]
+    #[clap(long, default_value = "ruuvi_measurement")]
     /// The name of the measurement in InfluxDB line protocol.
     influxdb_measurement: String,
-    #[structopt(long, parse(try_from_str = parse_alias))]
+    #[clap(long, parse(try_from_str = parse_alias))]
     /// Specify human-readable alias for RuuviTag id. For example --alias DE:AD:BE:EF:00:00=Sauna.
     alias: Vec<Alias>,
     /// Verbose output, print parse errors for unrecognized data
-    #[structopt(short = "v", long = "verbose")]
+    #[clap(short = 'v', long = "verbose")]
     verbose: bool,
 }
 
@@ -202,7 +202,7 @@ fn main() {
         eprintln!("Panic! {}", info);
         std::process::exit(0x2);
     }));
-    let options = Options::from_args();
+    let options = Options::parse();
     match listen(options) {
         Ok(_) => std::process::exit(0x0),
         Err(why) => {
