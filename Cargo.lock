@@ -920,7 +920,7 @@ checksum = "b6bd4cf01ca03e36e9049ccb3a4c0616d392b63d31af18f85e7ef7799f1e99a1"
 
 [[package]]
 name = "ruuvitag-listener"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "btleplug",
  "clap",
