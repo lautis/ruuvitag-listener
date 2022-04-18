@@ -17,3 +17,4 @@ clap = { version = "3.*", features = ["derive"] }
 opt-level = "s"
 lto = true
 panic = "abort"
+strip = "debuginfo"
