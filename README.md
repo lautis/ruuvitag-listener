@@ -2,7 +2,7 @@
 
 A command-line client to listen to [RuuviTag](https://ruuvi.com) Bluetooth LE sensor measurements and output as [InfluxDB line protocol](https://docs.influxdata.com/influxdb/v1.7/write_protocols/line_protocol_reference/). Binary downloads for x86 and ARM are available for [releases](https://github.com/lautis/ruuvitag-listener/releases).
 
-The output could be e.g. piped to [Telegraf Socket Listener](https://github.com/influxdata/telegraf/tree/master/plugins/inputs/socket_listener) with netcat. For an example setup, check out [examples/telegraf](./examples/telegraf/README.md).
+The output can be used in e.g. [Telegraf Execd Input](https://github.com/influxdata/telegraf/tree/master/plugins/inputs/execd). For an example setup, check out [examples/telegraf](./examples/telegraf/README.md).
 
 ## Requirements
 

@@ -1,11 +1,12 @@
 [Unit]
 Description = Listen to RuuviTag events
-After=ruuvitag-telegraf.service
-Wants=ruuvitag-telegraf.service
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-ExecStart = /bin/sh -c 'ruuvitag-listener | netcat -q0 -U /tmp/telegraf-ruuvitag.sock'
+ExecStartPre=/bin/sleep 5
+ExecStart = /bin/sh -c 'ruuvitag-listener | netcat -q 0 localhost 8094'
 Restart = always
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
