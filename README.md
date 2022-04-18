@@ -16,6 +16,17 @@ Download binary from [releases](https://github.com/lautis/ruuvitag-listener/rele
 sudo setcap 'cap_net_raw,cap_net_admin+eip' `which ruuvitag-listener`
 ```
 
+Alternatively, install ruuvitag-listener using any of the following package managers:
+
+| Distribution  | Repository  | Instructions                                                             |
+| ------------- | ----------- | ------------------------------------------------------------------------ |
+| *Any*         | [Crates.io] | `cargo install ruuvitag-listener --locked` (note: does not run `setcap`) |
+| Arch Linux    | [AUR]       | `yay -S ruuvitag-listener` or `yay -S ruuvitag-listener-bin`             |
+
+
+[AUR]: https://aur.archlinux.org/packages/ruuvitag-listener
+[Crates.io]: https://crates.io/crates/ruuvitag-listener
+
 ## Usage
 
 ```sh
