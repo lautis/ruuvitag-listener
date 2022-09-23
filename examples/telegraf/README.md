@@ -14,7 +14,7 @@ The example uses [execd input](https://github.com/influxdata/telegraf/blob/maste
 
 To take the in use, configure the output section to use your InfluxDB (or any other Telegraf output).
 
-The alias mapping is at the endo fthe example configuration. Use your RuuviTag ids in the same format.
+The alias mapping is at the end of the example configuration. Use your RuuviTag ids in the same format.
 
 ```
 [[inputs.execd]]
