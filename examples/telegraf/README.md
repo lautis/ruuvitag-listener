@@ -28,7 +28,7 @@ The alias mapping is at the end of the example configuration. Use your RuuviTag 
 
 ### Systemd services
 
-Two services are needed: [ruuvitag-listener.service](./ruuvitag-listener.service) and [ruuvitag-telegraf.service](./ruuvitag-telegraf.services).
+Two services are needed: [ruuvitag-listener.service](./ruuvitag-listener.service) and [ruuvitag-telegraf.service](./ruuvitag-telegraf.service).
 
 Copy these files to ~/.config/systemd/user` directory.
 
