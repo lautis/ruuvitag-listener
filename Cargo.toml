@@ -10,7 +10,7 @@ edition = "2021"
 
 [dependencies]
 btleplug = "0.5.*"
-ruuvi-sensor-protocol = "0.5.*"
+ruuvi-sensor-protocol = "0.6.*"
 clap = { version = "3.*", features = ["derive"] }
 
 [profile.release]
