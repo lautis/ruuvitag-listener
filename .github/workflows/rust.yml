@@ -17,7 +17,7 @@ jobs:
           - x86_64-unknown-linux-gnu
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -39,7 +39,7 @@ jobs:
         run: |
           tar czf ruuvitag-listener.tar.gz -C target/${{ matrix.target }}/release/ ruuvitag-listener
       - name: Upload binary
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v6
         with:
           name: ruuvitag-listener-${{ matrix.target }}.tar.gz
           path: ruuvitag-listener.tar.gz
@@ -49,7 +49,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -97,7 +97,7 @@ jobs:
     steps:
       - id: vars
         run: echo ::set-output name=version::${GITHUB_REF/refs\/tags\//}
-      - uses: actions/download-artifact@v2
+      - uses: actions/download-artifact@v6
         with:
           name: ruuvitag-listener-${{ matrix.target }}.tar.gz
       - name: Upload release asset
@@ -114,7 +114,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v6
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -129,7 +129,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v6
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
