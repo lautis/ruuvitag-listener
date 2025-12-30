@@ -151,6 +151,11 @@ impl InfluxDbFormatter {
             "measurement_sequence_number",
             m.measurement_sequence.map(f64::from)
         );
+        add!("pm2_5", m.pm2_5);
+        add!("co2", m.co2);
+        add!("voc_index", m.voc_index);
+        add!("nox_index", m.nox_index);
+        add!("luminosity", m.luminosity);
 
         if let Some((x, y, z)) = m.acceleration {
             fields.insert("acceleration_x".into(), FieldValue::Float(x));
@@ -250,6 +255,11 @@ mod tests {
             movement_counter: Some(10),
             measurement_sequence: Some(100),
             acceleration: Some((0.01, -0.02, 1.0)),
+            pm2_5: Some(12.5),
+            co2: Some(420.0),
+            voc_index: Some(123.0),
+            nox_index: Some(45.0),
+            luminosity: Some(10.0),
         };
 
         let result = formatter.format(&measurement);
@@ -267,6 +277,11 @@ mod tests {
         assert!(result.contains("acceleration_x=0.01"));
         assert!(result.contains("acceleration_y=-0.02"));
         assert!(result.contains("acceleration_z=1"));
+        assert!(result.contains("pm2_5=12.5"));
+        assert!(result.contains("co2=420"));
+        assert!(result.contains("voc_index=123"));
+        assert!(result.contains("nox_index=45"));
+        assert!(result.contains("luminosity=10"));
         assert!(result.ends_with("1000000000000000000"));
     }
 
@@ -288,6 +303,11 @@ mod tests {
             movement_counter: None,
             measurement_sequence: None,
             acceleration: None,
+            pm2_5: None,
+            co2: None,
+            voc_index: None,
+            nox_index: None,
+            luminosity: None,
         };
 
         let result = formatter.format(&measurement);
@@ -311,6 +331,11 @@ mod tests {
             movement_counter: None,
             measurement_sequence: None,
             acceleration: None,
+            pm2_5: None,
+            co2: None,
+            voc_index: None,
+            nox_index: None,
+            luminosity: None,
         };
 
         let result = formatter.format(&measurement);

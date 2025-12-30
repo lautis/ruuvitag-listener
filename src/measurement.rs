@@ -7,6 +7,10 @@
 /// - Battery voltage in Volts
 /// - TX power in dBm
 /// - Acceleration in g (standard gravity)
+/// - PM2.5 in micrograms per cubic meter (ug/m3)
+/// - CO2 in parts per million (ppm)
+/// - VOC/NOx indexes are unitless scores
+/// - Luminosity in lux
 #[derive(Debug, Clone, PartialEq)]
 pub struct Measurement {
     /// MAC address of the RuuviTag
@@ -29,6 +33,16 @@ pub struct Measurement {
     pub measurement_sequence: Option<u32>,
     /// Acceleration vector (x, y, z) in g
     pub acceleration: Option<(f64, f64, f64)>,
+    /// Particulate matter (PM2.5) concentration in ug/m3
+    pub pm2_5: Option<f64>,
+    /// Carbon dioxide concentration in ppm
+    pub co2: Option<f64>,
+    /// Volatile organic compound index
+    pub voc_index: Option<f64>,
+    /// Nitrogen oxides index
+    pub nox_index: Option<f64>,
+    /// Ambient luminosity in lux
+    pub luminosity: Option<f64>,
 }
 
 #[cfg(test)]
@@ -49,6 +63,11 @@ mod tests {
             movement_counter: Some(10),
             measurement_sequence: Some(100),
             acceleration: Some((0.0, 0.0, 1.0)),
+            pm2_5: Some(12.3),
+            co2: Some(800.0),
+            voc_index: Some(150.0),
+            nox_index: Some(10.0),
+            luminosity: Some(123.0),
         };
 
         assert_eq!(m.timestamp, timestamp);
@@ -60,6 +79,11 @@ mod tests {
         assert_eq!(m.movement_counter, Some(10));
         assert_eq!(m.measurement_sequence, Some(100));
         assert_eq!(m.acceleration, Some((0.0, 0.0, 1.0)));
+        assert_eq!(m.pm2_5, Some(12.3));
+        assert_eq!(m.co2, Some(800.0));
+        assert_eq!(m.voc_index, Some(150.0));
+        assert_eq!(m.nox_index, Some(10.0));
+        assert_eq!(m.luminosity, Some(123.0));
     }
 
     #[test]
@@ -74,6 +98,11 @@ mod tests {
             movement_counter: None,
             measurement_sequence: None,
             acceleration: None,
+            pm2_5: None,
+            co2: None,
+            voc_index: None,
+            nox_index: None,
+            luminosity: None,
             timestamp: std::time::SystemTime::now(),
         };
         let m2 = m1.clone();
