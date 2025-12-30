@@ -7,7 +7,7 @@ use crate::measurement::Measurement;
 use bluer::monitor::{Monitor, MonitorEvent, Pattern};
 use bluer::{Adapter, Address, Session};
 use futures::StreamExt;
-use ruuvi_decoders::v5;
+use ruuvi_decoders::{v5, v6};
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 
@@ -97,7 +97,7 @@ fn format_address(addr: Address) -> String {
 /// Decode manufacturer data from a RuuviTag into a Measurement.
 ///
 /// This function converts raw manufacturer data bytes into a structured `Measurement`
-/// with all values in standard SI units. Currently only supports RuuviTag V5 format.
+/// with all values in standard SI units. Supports RuuviTag V5 and V6 formats.
 ///
 /// # Arguments
 /// * `mac` - The MAC address of the device (formatted as "AA:BB:CC:DD:EE:FF")
@@ -110,26 +110,25 @@ fn format_address(addr: Address) -> String {
 /// - Battery voltage: millivolts → Volts (divide by 1000)
 /// - Acceleration: milli-g → g (divide by 1000)
 pub fn decode_ruuvi_data(mac: String, data: &[u8]) -> Result<Measurement, DecodeError> {
-    // Check format byte first
     if data.is_empty() {
         return Err(DecodeError::InvalidData("Empty data".into()));
     }
 
-    if data[0] != 5 {
-        return Err(DecodeError::UnsupportedFormat(format!(
-            "RuuviTag data format {} (only V5 supported)",
+    match data[0] {
+        5 => decode_v5_measurement(mac, data),
+        6 => decode_v6_measurement(mac, data),
+        _ => Err(DecodeError::UnsupportedFormat(format!(
+            "RuuviTag data format {} (only V5 and V6 supported)",
             data[0]
-        )));
+        ))),
     }
+}
 
-    // Decode V5 format directly from bytes
+fn decode_v5_measurement(mac: String, data: &[u8]) -> Result<Measurement, DecodeError> {
     match v5::decode(data) {
         Ok(tag) => {
-            // Convert battery potential from millivolts to Volts
             let battery_potential = tag.battery_voltage.map(|v| f64::from(v) / 1000.0);
 
-            // Convert acceleration from milli-g (i16) to g (f64)
-            // All three components must be present to include acceleration
             let acceleration = match (tag.acceleration_x, tag.acceleration_y, tag.acceleration_z) {
                 (Some(x), Some(y), Some(z)) => Some((
                     f64::from(x) / 1000.0,
@@ -150,6 +149,39 @@ pub fn decode_ruuvi_data(mac: String, data: &[u8]) -> Result<Measurement, Decode
                 movement_counter: tag.movement_counter.map(u32::from),
                 measurement_sequence: tag.measurement_sequence.map(u32::from),
                 acceleration,
+                pm2_5: None,
+                co2: None,
+                voc_index: None,
+                nox_index: None,
+                luminosity: None,
+            })
+        }
+        Err(e) => Err(DecodeError::DecoderError(format!(
+            "Failed to decode RuuviTag data: {e:?}"
+        ))),
+    }
+}
+
+fn decode_v6_measurement(mac: String, data: &[u8]) -> Result<Measurement, DecodeError> {
+    match v6::decode(data) {
+        Ok(tag) => {
+            Ok(Measurement {
+                mac,
+                timestamp: SystemTime::now(),
+                temperature: tag.temperature,
+                humidity: tag.humidity,
+                // Decoder returns hPa; store as Pa to stay consistent with v5 handling.
+                pressure: tag.pressure.map(|hpa| hpa * 100.0),
+                battery: None,
+                tx_power: None,
+                movement_counter: None,
+                measurement_sequence: tag.measurement_sequence.map(u32::from),
+                acceleration: None,
+                pm2_5: tag.pm2_5,
+                co2: tag.co2.map(f64::from),
+                voc_index: tag.voc_index.map(f64::from),
+                nox_index: tag.nox_index.map(f64::from),
+                luminosity: tag.luminosity,
             })
         }
         Err(e) => Err(DecodeError::DecoderError(format!(
@@ -306,6 +338,11 @@ mod tests {
         let (x, _y, z) = measurement.acceleration.unwrap();
         assert!((x - 0.004).abs() < 0.001);
         assert!((z - 1.036).abs() < 0.001);
+        assert!(measurement.pm2_5.is_none());
+        assert!(measurement.co2.is_none());
+        assert!(measurement.voc_index.is_none());
+        assert!(measurement.nox_index.is_none());
+        assert!(measurement.luminosity.is_none());
     }
 
     #[test]
@@ -313,6 +350,32 @@ mod tests {
         let data: Vec<u8> = vec![0x00, 0x01, 0x02]; // Invalid/too short data
         let result = decode_ruuvi_data("AA:BB:CC:DD:EE:FF".to_string(), &data);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_ruuvi_data_v6() {
+        // Example V6 payload (includes format byte and compact MAC)
+        let data: Vec<u8> = vec![
+            0x06, 0x17, 0x0C, 0x56, 0x68, 0xC7, 0x9E, 0x00, 0x70, 0x00, 0xC9, 0x05, 0x01, 0xD9,
+            0xFF, 0xCD, 0x00, 0x4C, 0x88, 0x4F,
+        ];
+
+        let result = decode_ruuvi_data("AA:BB:CC:DD:EE:FF".to_string(), &data);
+        assert!(result.is_ok());
+
+        let measurement = result.unwrap();
+        assert_eq!(measurement.mac, "AA:BB:CC:DD:EE:FF");
+        assert!(measurement.temperature.is_some());
+        assert!(measurement.humidity.is_some());
+        assert!(measurement.pressure.is_some());
+        assert!(measurement.pm2_5.is_some());
+        assert!(measurement.co2.is_some());
+        assert!(measurement.voc_index.is_some());
+        assert!(measurement.nox_index.is_some());
+        assert!(measurement.luminosity.is_some());
+        assert!(measurement.acceleration.is_none());
+        assert!(measurement.battery.is_none());
+        assert!(measurement.tx_power.is_none());
     }
 
     #[test]
