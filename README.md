@@ -6,24 +6,19 @@ The output can be used in e.g. [Telegraf Execd Input](https://github.com/influxd
 
 ## Requirements
 
-* RuuviTag Bluetooth sensor
-* Linux with BlueZ Bluetooth stack
+- RuuviTag Bluetooth sensor
+- Linux with BlueZ Bluetooth stack
 
 ## Installation
 
-Download binary from [releases](https://github.com/lautis/ruuvitag-listener/releases) to your $PATH. Then, set file capabilities to allow access to Bluetooth with
-
-```sh
-sudo setcap 'cap_net_raw,cap_net_admin+eip' `which ruuvitag-listener`
-```
+Download binary from [releases](https://github.com/lautis/ruuvitag-listener/releases) to your $PATH.
 
 Alternatively, install ruuvitag-listener using any of the following package managers:
 
-| Distribution  | Repository  | Instructions                                                             |
-| ------------- | ----------- | ------------------------------------------------------------------------ |
-| *Any*         | [Crates.io] | `cargo install ruuvitag-listener --locked` (note: does not run `setcap`) |
-| Arch Linux    | [AUR]       | `yay -S ruuvitag-listener` or `yay -S ruuvitag-listener-bin`             |
-
+| Distribution | Repository  | Instructions                                                 |
+| ------------ | ----------- | ------------------------------------------------------------ |
+| _Any_        | [Crates.io] | `cargo install ruuvitag-listener --locked`                   |
+| Arch Linux   | [AUR]       | `yay -S ruuvitag-listener` or `yay -S ruuvitag-listener-bin` |
 
 [AUR]: https://aur.archlinux.org/packages/ruuvitag-listener
 [Crates.io]: https://crates.io/crates/ruuvitag-listener
@@ -57,6 +52,21 @@ ruuvi,name=Outdoor acceleration_x=-0.054,acceleration_y=-0.032,acceleration_z=1.
 ```
 
 All options can be listed with `ruuvitag-listener --help`.
+
+## Troubleshooting
+
+If you see a confusing error related to DBus, you probably need to enable bluetoothd with experimental features. Add the following to `/etc/bluetooth/main.conf`:
+
+```
+[General]
+Experimental = true
+```
+
+Then restart bluetoothd:
+
+```sh
+sudo systemctl restart bluetooth
+```
 
 ## Development
 

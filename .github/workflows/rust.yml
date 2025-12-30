@@ -10,60 +10,93 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target:
-        - aarch64-unknown-linux-gnu
-        - arm-unknown-linux-gnueabi
-        - armv7-unknown-linux-gnueabihf
-        - x86_64-unknown-linux-gnu
+        include:
+          - target: aarch64-unknown-linux-gnu
+            cross: true
+          - target: armv7-unknown-linux-gnueabihf
+            cross: true
+          - target: x86_64-unknown-linux-gnu
+            cross: false
 
     steps:
-    - uses: actions/checkout@v2
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        profile: minimal
-        target: ${{ matrix.target }}
-        override: true
-    - uses: actions-rs/cargo@v1
-      with:
-        use-cross: true
-        command: build
-        args: --release --locked --target ${{ matrix.target }}
-    - uses: actions-rs/cargo@v1
-      with:
-        use-cross: true
-        command: test
-        args: --locked --target ${{ matrix.target }}
-    - name: Tarball release
-      run: |
-        tar czf ruuvitag-listener.tar.gz -C target/${{ matrix.target }}/release/ ruuvitag-listener
-    - name: Upload binary
-      uses: actions/upload-artifact@v2
-      with:
-        name: ruuvitag-listener-${{ matrix.target }}.tar.gz
-        path: ruuvitag-listener.tar.gz
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@cross
+
+      - name: Install system dependencies (native build)
+        if: ${{ !matrix.cross }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libdbus-1-dev \
+            libbluetooth-dev \
+            libudev-dev
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Test (cross)
+        if: matrix.cross
+        run: cross test --locked --target ${{ matrix.target }}
+
+      - name: Test (native)
+        if: ${{ !matrix.cross }}
+        run: cargo test --locked --target ${{ matrix.target }}
+
+      - name: Tarball release
+        run: |
+          tar czf ruuvitag-listener.tar.gz -C target/${{ matrix.target }}/release/ ruuvitag-listener
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruuvitag-listener-${{ matrix.target }}.tar.gz
+          path: ruuvitag-listener.tar.gz
+
   crates_io_publish:
     name: Publish to crates.io
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        override: true
-        profile: minimal
-    - name: Login to crates.io
-      run: cargo login $CRATES_IO_TOKEN
-      env:
-        CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-    - name: Dry run publish
-      run: cargo publish --dry-run
-    - name: Publish
-      run: cargo publish
+      - uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libdbus-1-dev \
+            libbluetooth-dev \
+            libudev-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Login to crates.io
+        run: cargo login $CRATES_IO_TOKEN
+        env:
+          CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+
+      - name: Dry run publish
+        run: cargo publish --dry-run
+
+      - name: Publish
+        run: cargo publish
+
   create_release:
     name: Create release
     if: startsWith(github.ref, 'refs/tags/v')
@@ -72,16 +105,17 @@ jobs:
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
-    - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ github.ref }}
-        release_name: ${{ github.ref }}
-        draft: false
-        prerelease: false
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: ${{ github.ref }}
+          draft: false
+          prerelease: false
+
   upload_release_assets:
     name: Upload release assets
     if: startsWith(github.ref, 'refs/tags/v')
@@ -90,54 +124,61 @@ jobs:
     strategy:
       matrix:
         target:
-        - aarch64-unknown-linux-gnu
-        - arm-unknown-linux-gnueabi
-        - armv7-unknown-linux-gnueabihf
-        - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+          - x86_64-unknown-linux-gnu
     steps:
-    - id: vars
-      run: echo ::set-output name=version::${GITHUB_REF/refs\/tags\//}
-    - uses: actions/download-artifact@v2
-      with:
-        name: ruuvitag-listener-${{ matrix.target }}.tar.gz
-    - name: Upload release asset
-      id: upload-release-asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create_release.outputs.upload_url }}
-        asset_path: ./ruuvitag-listener.tar.gz
-        asset_name: ruuvitag-listener-${{ steps.vars.outputs.version }}-${{ matrix.target }}.tar.gz
-        asset_content_type: application/gzip
+      - id: vars
+        run: echo "version=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_OUTPUT
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ruuvitag-listener-${{ matrix.target }}.tar.gz
+
+      - name: Upload release asset
+        id: upload-release-asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create_release.outputs.upload_url }}
+          asset_path: ./ruuvitag-listener.tar.gz
+          asset_name: ruuvitag-listener-${{ steps.vars.outputs.version }}-${{ matrix.target }}.tar.gz
+          asset_content_type: application/gzip
+
   rustfmt:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v2
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        override: true
-        profile: minimal
-        components: rustfmt
-    - name: Check formatting
-      run: |
-        cargo fmt --all -- --check
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
   clippy:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v2
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: stable
-        components: clippy
-    - name: Run clippy
-      uses: actions-rs/clippy-check@v1
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        args: --all-features
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libdbus-1-dev \
+            libbluetooth-dev \
+            libudev-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Run clippy
+        run: cargo clippy --all-features -- -D warnings

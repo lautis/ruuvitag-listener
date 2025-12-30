@@ -1,216 +1,109 @@
-extern crate btleplug;
-extern crate clap;
-extern crate ruuvi_sensor_protocol;
-
 use clap::Parser;
-use std::collections::BTreeMap;
 use std::io::Write;
-use std::panic::{self, PanicInfo};
-use std::time::SystemTime;
+use std::panic::{self, PanicHookInfo};
 
-use crate::ruuvi_sensor_protocol::{
-    Acceleration, BatteryPotential, Humidity, MeasurementSequenceNumber, MovementCounter, Pressure,
-    Temperature, TransmitterPower,
-};
-pub mod ruuvi;
-use ruuvi::{on_measurement, Measurement};
+mod alias;
+mod measurement;
+mod output;
+mod scanner;
 
-pub mod influxdb;
-use influxdb::{DataPoint, FieldValue};
+use alias::{Alias, parse_alias};
+use measurement::Measurement;
+use output::OutputFormatter;
+use output::influxdb::InfluxDbFormatter;
 
-use btleplug::Error::PermissionDenied;
-
-fn tag_set(
-    aliases: &BTreeMap<String, String>,
-    measurement: &Measurement,
-) -> BTreeMap<String, String> {
-    let mut tags = BTreeMap::new();
-    let address = measurement.address.to_string();
-    tags.insert("mac".to_string(), address.to_string());
-    tags.insert(
-        "name".to_string(),
-        aliases.get(&address).unwrap_or(&address).to_string(),
-    );
-    tags
-}
-
-macro_rules! to_float {
-    ( $value: expr, $scale: expr ) => {{
-        FieldValue::FloatValue(f64::from($value) / $scale)
-    }};
-}
-
-macro_rules! add_value {
-    ( $fields: ident, $value: expr, $field: expr, $scale: expr ) => {{
-        if let Some(value) = $value {
-            $fields.insert($field.to_string(), to_float!(value, $scale));
-        }
-    }};
-}
-
-fn field_set(measurement: &Measurement) -> BTreeMap<String, FieldValue> {
-    let mut fields = BTreeMap::new();
-    add_value!(
-        fields,
-        measurement.sensor_values.temperature_as_millicelsius(),
-        "temperature",
-        1000.0
-    );
-    add_value!(
-        fields,
-        measurement.sensor_values.humidity_as_ppm(),
-        "humidity",
-        10000.0
-    );
-    add_value!(
-        fields,
-        measurement.sensor_values.pressure_as_pascals(),
-        "pressure",
-        1000.0
-    );
-    add_value!(
-        fields,
-        measurement.sensor_values.battery_potential_as_millivolts(),
-        "battery_potential",
-        1000.0
-    );
-
-    add_value!(
-        fields,
-        measurement.sensor_values.tx_power_as_dbm(),
-        "tx_power",
-        1.0
-    );
-
-    add_value!(
-        fields,
-        measurement.sensor_values.movement_counter(),
-        "movement_counter",
-        1.0
-    );
-
-    add_value!(
-        fields,
-        measurement.sensor_values.measurement_sequence_number(),
-        "measurement_sequence_number",
-        1.0
-    );
-
-    if let Some(ref acceleration) = measurement.sensor_values.acceleration_vector_as_milli_g() {
-        fields.insert(
-            "acceleration_x".to_string(),
-            to_float!(acceleration.0, 1000.0),
-        );
-        fields.insert(
-            "acceleration_y".to_string(),
-            to_float!(acceleration.1, 1000.0),
-        );
-        fields.insert(
-            "acceleration_z".to_string(),
-            to_float!(acceleration.2, 1000.0),
-        );
-    }
-
-    fields
-}
-
-fn to_data_point(
-    aliases: &BTreeMap<String, String>,
-    name: String,
-    measurement: &Measurement,
-) -> DataPoint {
-    DataPoint {
-        measurement: name,
-        tag_set: tag_set(aliases, &measurement),
-        field_set: field_set(&measurement),
-        timestamp: Some(SystemTime::now()),
-    }
-}
-
-#[derive(Debug)]
-pub struct Alias {
-    pub address: String,
-    pub name: String,
-}
-
-fn parse_alias(src: &str) -> Result<Alias, String> {
-    let index = src.find('=');
-    match index {
-        Some(i) => {
-            let (address, name) = src.split_at(i);
-            Ok(Alias {
-                address: address.to_string(),
-                name: name.get(1..).unwrap_or("").to_string(),
-            })
-        }
-        None => Err("invalid alias".to_string()),
-    }
-}
-
-fn alias_map(aliases: &[Alias]) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
-    for alias in aliases.iter() {
-        map.insert(alias.address.to_string(), alias.name.to_string());
-    }
-    map
-}
+/// Exit codes for the application
+const EXIT_SUCCESS: i32 = 0;
+const EXIT_ERROR: i32 = 1;
+const EXIT_PANIC: i32 = 2;
 
 #[derive(Parser, Debug)]
-#[clap(author, about, rename_all = "kebab-case")]
+#[command(author, about, version)]
 struct Options {
-    #[clap(long, default_value = "ruuvi_measurement")]
     /// The name of the measurement in InfluxDB line protocol.
+    #[arg(long, default_value = "ruuvi_measurement")]
     influxdb_measurement: String,
-    #[clap(long, parse(try_from_str = parse_alias))]
-    /// Specify human-readable alias for RuuviTag id. For example --alias DE:AD:BE:EF:00:00=Sauna.
+
+    /// Specify human-readable alias for RuuviTag id.
+    /// Format: --alias DE:AD:BE:EF:00:00=Sauna
+    #[arg(long, value_parser = parse_alias)]
     alias: Vec<Alias>,
+
     /// Verbose output, print parse errors for unrecognized data
-    #[clap(short = 'v', long = "verbose")]
+    #[arg(short = 'v', long = "verbose")]
     verbose: bool,
 }
 
-fn print_result(aliases: &BTreeMap<String, String>, name: &str, measurement: Measurement) {
-    match writeln!(
-        std::io::stdout(),
-        "{}",
-        to_data_point(&aliases, name.to_string(), &measurement)
-    ) {
-        Ok(_) => (),
-        Err(error) => {
-            eprintln!("error: {}", error);
-            ::std::process::exit(1);
+/// Print a formatted measurement to stdout.
+///
+/// # Arguments
+/// * `formatter` - The formatter to use for converting the measurement to a string
+/// * `measurement` - The measurement data to format and print
+///
+/// # Errors
+/// Returns an `io::Error` if writing to stdout fails
+fn print_measurement(
+    formatter: &dyn OutputFormatter,
+    measurement: &Measurement,
+) -> std::io::Result<()> {
+    let output = formatter.format(measurement);
+    writeln!(std::io::stdout(), "{}", output)
+}
+
+/// Main application entry point that sets up scanning and output formatting.
+///
+/// This function:
+/// 1. Converts CLI aliases into a lookup map
+/// 2. Creates an InfluxDB formatter with the specified measurement name
+/// 3. Starts the BLE scanner
+/// 4. Processes measurements and outputs them to stdout until interrupted
+///
+/// # Arguments
+/// * `options` - Command-line options parsed from user input
+///
+/// # Errors
+/// Returns `ScanError` if Bluetooth initialization fails
+async fn run(options: Options) -> Result<(), scanner::ScanError> {
+    let aliases = alias::to_map(&options.alias);
+    let formatter = InfluxDbFormatter::new(options.influxdb_measurement.clone(), aliases);
+
+    let mut measurements = scanner::start_scan(options.verbose).await?;
+
+    while let Some(result) = measurements.recv().await {
+        match result {
+            Ok(measurement) => {
+                if let Err(error) = print_measurement(&formatter, &measurement) {
+                    eprintln!("error: {}", error);
+                    std::process::exit(EXIT_ERROR);
+                }
+            }
+            Err(error) => {
+                if options.verbose {
+                    eprintln!("{}", error);
+                }
+            }
         }
     }
+
+    Ok(())
 }
 
-fn listen(options: Options) -> Result<(), btleplug::Error> {
-    let name = options.influxdb_measurement;
-    let aliases = alias_map(&options.alias);
-    let verbose = options.verbose;
-    on_measurement(Box::new(move |result| match result {
-        Ok(measurement) => print_result(&aliases, &name, measurement),
-        Err(error) => {
-            if verbose {
-                eprintln!("{}", error)
-            }
-        }
-    }))
-}
-
-fn main() {
-    panic::set_hook(Box::new(move |info: &PanicInfo| {
+#[tokio::main]
+async fn main() {
+    // Set up panic hook to ensure clean exit codes for process managers
+    // (e.g., systemd, Telegraf execd) that monitor exit status
+    panic::set_hook(Box::new(move |info: &PanicHookInfo| {
         eprintln!("Panic! {}", info);
-        std::process::exit(0x2);
+        std::process::exit(EXIT_PANIC);
     }));
+
     let options = Options::parse();
-    match listen(options) {
-        Ok(_) => std::process::exit(0x0),
+
+    match run(options).await {
+        Ok(_) => std::process::exit(EXIT_SUCCESS),
         Err(why) => {
-            match why {
-                PermissionDenied => println!("error: Permission Denied. Have you run setcap?"),
-                _ => eprintln!("error: {}", why),
-            }
-            std::process::exit(0x1);
+            eprintln!("error: {}", why);
+            std::process::exit(EXIT_ERROR);
         }
     }
 }
