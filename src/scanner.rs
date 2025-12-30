@@ -198,18 +198,17 @@ pub async fn start_scan(verbose: bool) -> Result<mpsc::Receiver<MeasurementResul
         let _monitor_manager = monitor_manager;
 
         while let Some(event) = monitor_handle.next().await {
-            if let MonitorEvent::DeviceFound(device_id) = event {
-                if let Err(e) = process_device(&adapter, device_id.device, &tx, verbose).await {
-                    if verbose {
-                        let err = match e {
-                            ScanError::Bluetooth(e) => {
-                                DecodeError::InvalidData(format!("Bluetooth error: {e}"))
-                            }
-                            ScanError::Decode(e) => e,
-                        };
-                        let _ = tx.send(Err(err)).await;
+            if let MonitorEvent::DeviceFound(device_id) = event
+                && let Err(e) = process_device(&adapter, device_id.device, &tx, verbose).await
+                && verbose
+            {
+                let err = match e {
+                    ScanError::Bluetooth(e) => {
+                        DecodeError::InvalidData(format!("Bluetooth error: {e}"))
                     }
-                }
+                    ScanError::Decode(e) => e,
+                };
+                let _ = tx.send(Err(err)).await;
             }
         }
     });

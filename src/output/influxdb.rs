@@ -4,12 +4,15 @@ use crate::measurement::Measurement;
 use crate::output::OutputFormatter;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::time::{Duration, SystemTime};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::SystemTime;
 
 /// Field values for InfluxDB line protocol
 #[derive(Debug, PartialEq)]
 pub enum FieldValue {
     Float(f64),
+    #[allow(dead_code)] // Used in tests
     String(String),
 }
 
