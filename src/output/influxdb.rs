@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn test_field_value_display() {
-        assert_eq!(format!("{}", FieldValue::Float(3.14)), "3.14");
+        assert_eq!(format!("{}", FieldValue::Float(2.5)), "2.5");
         assert_eq!(
             format!("{}", FieldValue::String("test".to_string())),
             "\"test\""
