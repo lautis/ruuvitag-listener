@@ -2,12 +2,15 @@
 
 A command-line client to listen to [RuuviTag](https://ruuvi.com) sensor measurements over Bluetooth LE and output as [InfluxDB line protocol](https://docs.influxdata.com/influxdb/v1.7/write_protocols/line_protocol_reference/).
 
+The listener understands RuuviTag data formats 5 and 6.
+
 The output can be used in e.g. [Telegraf Execd Input](https://github.com/influxdata/telegraf/tree/master/plugins/inputs/execd). For an example setup, check out [examples/telegraf](./examples/telegraf/README.md).
 
 ## Requirements
 
 - RuuviTag Bluetooth sensor
 - Linux with BlueZ Bluetooth stack
+- DBus (for Bluetooth access via BlueZ)
 
 ## Installation
 
