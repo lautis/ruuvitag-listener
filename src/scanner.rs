@@ -7,7 +7,7 @@ use crate::measurement::Measurement;
 use bluer::monitor::{Monitor, MonitorEvent, Pattern};
 use bluer::{Adapter, Address, Session};
 use futures::StreamExt;
-use ruuvi_decoders::{RuuviData, decode};
+use ruuvi_decoders::v5;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 
@@ -110,10 +110,21 @@ fn format_address(addr: Address) -> String {
 /// - Battery voltage: millivolts → Volts (divide by 1000)
 /// - Acceleration: milli-g → g (divide by 1000)
 pub fn decode_ruuvi_data(mac: String, data: &[u8]) -> Result<Measurement, DecodeError> {
-    let hex_payload: String = data.iter().map(|b| format!("{:02x}", b)).collect();
+    // Check format byte first
+    if data.is_empty() {
+        return Err(DecodeError::InvalidData("Empty data".into()));
+    }
 
-    match decode(&hex_payload) {
-        Ok(RuuviData::V5(tag)) => {
+    if data[0] != 5 {
+        return Err(DecodeError::UnsupportedFormat(format!(
+            "RuuviTag data format {} (only V5 supported)",
+            data[0]
+        )));
+    }
+
+    // Decode V5 format directly from bytes
+    match v5::decode(data) {
+        Ok(tag) => {
             // Convert battery potential from millivolts to Volts
             let battery_potential = tag.battery_voltage.map(|v| f64::from(v) / 1000.0);
 
@@ -141,10 +152,6 @@ pub fn decode_ruuvi_data(mac: String, data: &[u8]) -> Result<Measurement, Decode
                 acceleration,
             })
         }
-        Ok(other_format) => Err(DecodeError::UnsupportedFormat(format!(
-            "RuuviTag data format {:?} (only V5 supported)",
-            other_format
-        ))),
         Err(e) => Err(DecodeError::DecoderError(format!(
             "Failed to decode RuuviTag data: {e:?}"
         ))),
