@@ -700,7 +700,7 @@ dependencies = [
 
 [[package]]
 name = "ruuvitag-listener"
-version = "0.5.5"
+version = "0.6.0"
 dependencies = [
  "bluer",
  "clap",
