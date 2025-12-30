@@ -1,0 +1,36 @@
+{
+  "name": "ruuvitag-listener",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "remoteUser": "vscode",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "rust-analyzer.checkOnSave": true,
+        "rust-analyzer.check.command": "clippy",
+        "rust-analyzer.cargo.buildScripts.enable": true,
+        "files.watcherExclude": {
+          "**/target/**": true
+        },
+        "search.exclude": {
+          "**/target": true
+        }
+      },
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "serayuzgur.crates"
+      ]
+    }
+  },
+  "mounts": [
+    {
+      "source": "ruuvitag-listener-target",
+      "target": "/workspaces/${localWorkspaceFolderBasename}/target",
+      "type": "volume"
+    }
+  ],
+  "postCreateCommand": "rustc --version && cargo --version"
+}
