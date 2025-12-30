@@ -32,5 +32,6 @@
       "type": "volume"
     }
   ],
-  "postCreateCommand": "rustc --version && cargo --version"
+  "postCreateCommand": "rustc --version && cargo --version",
+  "postStartCommand": "sudo chown -R vscode:vscode /workspaces/${localWorkspaceFolderBasename}/target 2>/dev/null || true"
 }
