@@ -11,26 +11,56 @@ use ruuvi_decoders::{RuuviData, decode};
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 
-/// Convenience alias for decoded measurements or decode errors.
-pub type MeasurementResult = Result<Measurement, String>;
+/// Error types for decoding RuuviTag data.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecodeError {
+    /// Unsupported RuuviTag data format (e.g., V2, V3, V4 when only V5 is supported)
+    UnsupportedFormat(String),
+    /// Invalid or corrupted data that cannot be decoded
+    InvalidData(String),
+    /// Decoder library returned an error
+    DecoderError(String),
+}
 
-/// Ruuvi Innovations manufacturer ID (little-endian bytes for pattern matching)
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecodeError::UnsupportedFormat(msg) => write!(f, "Unsupported format: {}", msg),
+            DecodeError::InvalidData(msg) => write!(f, "Invalid data: {}", msg),
+            DecodeError::DecoderError(msg) => write!(f, "Decoder error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+/// Convenience alias for decoded measurements or decode errors.
+pub type MeasurementResult = Result<Measurement, DecodeError>;
+
+/// Ruuvi Innovations manufacturer ID (little-endian bytes for pattern matching).
+///
+/// Bluetooth LE advertisements use little-endian byte order for manufacturer IDs.
+/// This is the byte representation of 0x0499 used for filtering advertisements.
+/// See: https://github.com/ruuvi/ruuvi-sensor-protocols
 const RUUVI_MANUFACTURER_ID_BYTES: [u8; 2] = [0x99, 0x04];
 
-/// Ruuvi Innovations manufacturer ID for data lookup
+/// Ruuvi Innovations manufacturer ID for data lookup.
+///
+/// This is the big-endian representation (0x0499) used when looking up
+/// manufacturer-specific data from device advertisements.
 const RUUVI_MANUFACTURER_ID: u16 = 0x0499;
 
 /// Bluetooth manufacturer-specific data type (AD type 0xFF)
 const MANUFACTURER_DATA_TYPE: u8 = 0xff;
 
-/// Channel buffer size for measurement results
+/// Channel buffer size for measurement results.
 const MEASUREMENT_CHANNEL_BUFFER_SIZE: usize = 100;
 
 /// Error type for scanner operations.
 #[derive(Debug)]
 pub enum ScanError {
     Bluetooth(bluer::Error),
-    Decode(String),
+    Decode(DecodeError),
 }
 
 impl std::fmt::Display for ScanError {
@@ -39,6 +69,12 @@ impl std::fmt::Display for ScanError {
             ScanError::Bluetooth(e) => write!(f, "Bluetooth error: {}", e),
             ScanError::Decode(e) => write!(f, "Decode error: {}", e),
         }
+    }
+}
+
+impl From<DecodeError> for ScanError {
+    fn from(err: DecodeError) -> Self {
+        ScanError::Decode(err)
     }
 }
 
@@ -68,13 +104,12 @@ fn format_address(addr: Address) -> String {
 /// * `data` - The manufacturer-specific data bytes (without the company ID prefix)
 ///
 /// # Returns
-/// A Result containing the decoded Measurement or a decode error message.
+/// A Result containing the decoded Measurement or a DecodeError.
 ///
 /// # Unit Conversions
 /// - Battery voltage: millivolts → Volts (divide by 1000)
 /// - Acceleration: milli-g → g (divide by 1000)
-pub fn decode_ruuvi_data(mac: String, data: &[u8]) -> Result<Measurement, String> {
-    // Convert bytes to hex string for ruuvi-decoders library
+pub fn decode_ruuvi_data(mac: String, data: &[u8]) -> Result<Measurement, DecodeError> {
     let hex_payload: String = data.iter().map(|b| format!("{:02x}", b)).collect();
 
     match decode(&hex_payload) {
@@ -106,8 +141,13 @@ pub fn decode_ruuvi_data(mac: String, data: &[u8]) -> Result<Measurement, String
                 acceleration,
             })
         }
-        Ok(_) => Err("Unsupported RuuviTag data format (only V5 supported)".to_string()),
-        Err(e) => Err(format!("Failed to decode RuuviTag data: {:?}", e)),
+        Ok(other_format) => Err(DecodeError::UnsupportedFormat(format!(
+            "RuuviTag data format {:?} (only V5 supported)",
+            other_format
+        ))),
+        Err(e) => Err(DecodeError::DecoderError(format!(
+            "Failed to decode RuuviTag data: {e:?}"
+        ))),
     }
 }
 
@@ -152,18 +192,15 @@ pub async fn start_scan(verbose: bool) -> Result<mpsc::Receiver<MeasurementResul
 
         while let Some(event) = monitor_handle.next().await {
             if let MonitorEvent::DeviceFound(device_id) = event {
-                match process_device(&adapter, device_id.device, &tx, verbose).await {
-                    Ok(()) => {
-                        // Device processed successfully
-                    }
-                    Err(e) if verbose => {
-                        // Only send errors if verbose mode is enabled
-                        let _ = tx
-                            .send(Err(format!("Error processing device: {}", e)))
-                            .await;
-                    }
-                    Err(_) => {
-                        // Silently ignore errors in non-verbose mode
+                if let Err(e) = process_device(&adapter, device_id.device, &tx, verbose).await {
+                    if verbose {
+                        let err = match e {
+                            ScanError::Bluetooth(e) => {
+                                DecodeError::InvalidData(format!("Bluetooth error: {e}"))
+                            }
+                            ScanError::Decode(e) => e,
+                        };
+                        let _ = tx.send(Err(err)).await;
                     }
                 }
             }
@@ -204,12 +241,9 @@ async fn process_device(
             let _ = tx.send(Ok(measurement)).await;
         }
         Err(e) if verbose => {
-            // In verbose mode, send decode errors to the channel
             let _ = tx.send(Err(e)).await;
         }
-        Err(_) => {
-            // In non-verbose mode, silently ignore decode errors
-        }
+        _ => {}
     }
 
     Ok(())
@@ -276,8 +310,21 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_error_display() {
+        let err = DecodeError::InvalidData("test error".to_string());
+        assert_eq!(format!("{}", err), "Invalid data: test error");
+
+        let err2 = DecodeError::UnsupportedFormat("V2".to_string());
+        assert_eq!(format!("{}", err2), "Unsupported format: V2");
+
+        let err3 = DecodeError::DecoderError("parse failed".to_string());
+        assert_eq!(format!("{}", err3), "Decoder error: parse failed");
+    }
+
+    #[test]
     fn test_scan_error_display() {
-        let err = ScanError::Decode("test error".to_string());
-        assert_eq!(format!("{}", err), "Decode error: test error");
+        let decode_err = DecodeError::InvalidData("test error".to_string());
+        let err = ScanError::Decode(decode_err);
+        assert_eq!(format!("{}", err), "Decode error: Invalid data: test error");
     }
 }
