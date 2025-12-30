@@ -4,6 +4,7 @@
 //! are emitted for each individual RuuviTag. This is useful for reducing output
 //! volume when tags broadcast frequently but data changes slowly.
 
+use bluer::Address;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -14,12 +15,15 @@ use std::time::{Duration, Instant};
 ///
 /// Stale entries (devices that haven't been seen in a long time) are automatically
 /// cleaned up to prevent memory leaks.
+///
+/// Uses `bluer::Address` (6-byte array) instead of String for efficient storage
+/// and zero-allocation lookups.
 #[derive(Debug)]
 pub struct Throttle {
     /// Minimum time between events for each device
     interval: Duration,
-    /// Last event time for each MAC address
-    last_seen: HashMap<String, Instant>,
+    /// Last event time for each MAC address (using efficient Address keys)
+    last_seen: HashMap<Address, Instant>,
     /// Counter for periodic cleanup
     check_count: usize,
 }
@@ -66,11 +70,11 @@ impl Throttle {
     /// Periodically cleans up stale entries to prevent memory leaks.
     ///
     /// # Arguments
-    /// * `mac` - The MAC address of the device
+    /// * `mac` - The MAC address of the device (efficient 6-byte representation)
     ///
     /// # Returns
     /// `true` if the event should be emitted, `false` if it should be throttled
-    pub fn should_emit(&mut self, mac: &str) -> bool {
+    pub fn should_emit(&mut self, mac: Address) -> bool {
         // Periodically clean up stale entries, but only if we have enough
         // entries to make it worthwhile
         self.check_count += 1;
@@ -83,10 +87,19 @@ impl Throttle {
 
         let now = Instant::now();
 
-        match self.last_seen.get(mac) {
-            Some(last) if now.duration_since(*last) < self.interval => false,
-            _ => {
-                self.last_seen.insert(mac.to_string(), now);
+        // Use entry API for zero-allocation updates on existing keys
+        use std::collections::hash_map::Entry;
+        match self.last_seen.entry(mac) {
+            Entry::Occupied(mut entry) => {
+                if now.duration_since(*entry.get()) < self.interval {
+                    false
+                } else {
+                    entry.insert(now);
+                    true
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(now);
                 true
             }
         }
@@ -185,77 +198,78 @@ pub fn parse_duration(src: &str) -> Result<Duration, String> {
 mod tests {
     use super::*;
 
+    const MAC1: Address = Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+    const MAC2: Address = Address([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+    const MAC_ZERO: Address = Address([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
     #[test]
     fn test_throttle_first_event_allowed() {
         let mut throttle = Throttle::new(Duration::from_secs(1));
-        assert!(throttle.should_emit("AA:BB:CC:DD:EE:FF"));
+        assert!(throttle.should_emit(MAC1));
     }
 
     #[test]
     fn test_throttle_immediate_second_event_blocked() {
         let mut throttle = Throttle::new(Duration::from_secs(1));
-        assert!(throttle.should_emit("AA:BB:CC:DD:EE:FF"));
-        assert!(!throttle.should_emit("AA:BB:CC:DD:EE:FF"));
+        assert!(throttle.should_emit(MAC1));
+        assert!(!throttle.should_emit(MAC1));
     }
 
     #[test]
     fn test_throttle_different_devices_independent() {
         let mut throttle = Throttle::new(Duration::from_secs(1));
-        assert!(throttle.should_emit("AA:BB:CC:DD:EE:FF"));
-        assert!(throttle.should_emit("11:22:33:44:55:66"));
-        assert!(!throttle.should_emit("AA:BB:CC:DD:EE:FF"));
-        assert!(!throttle.should_emit("11:22:33:44:55:66"));
+        assert!(throttle.should_emit(MAC1));
+        assert!(throttle.should_emit(MAC2));
+        assert!(!throttle.should_emit(MAC1));
+        assert!(!throttle.should_emit(MAC2));
     }
 
     #[test]
     fn test_throttle_zero_interval() {
         let mut throttle = Throttle::new(Duration::ZERO);
-        assert!(throttle.should_emit("AA:BB:CC:DD:EE:FF"));
-        assert!(throttle.should_emit("AA:BB:CC:DD:EE:FF"));
+        assert!(throttle.should_emit(MAC1));
+        assert!(throttle.should_emit(MAC1));
     }
 
     #[test]
     fn test_throttle_allowed_after_interval_passes() {
         let mut throttle = Throttle::new(Duration::from_millis(10));
-        assert!(throttle.should_emit("AA:BB:CC:DD:EE:FF"));
-        assert!(!throttle.should_emit("AA:BB:CC:DD:EE:FF"));
+        assert!(throttle.should_emit(MAC1));
+        assert!(!throttle.should_emit(MAC1));
 
         // Wait for the interval to pass
         std::thread::sleep(Duration::from_millis(15));
 
         // Should now be allowed again
-        assert!(throttle.should_emit("AA:BB:CC:DD:EE:FF"));
+        assert!(throttle.should_emit(MAC1));
     }
 
     #[test]
     fn test_throttle_multiple_rapid_events_only_first_allowed() {
         let mut throttle = Throttle::new(Duration::from_secs(1));
-        let mac = "AA:BB:CC:DD:EE:FF";
 
         // First event allowed
-        assert!(throttle.should_emit(mac));
+        assert!(throttle.should_emit(MAC1));
 
         // All subsequent rapid events blocked
         for _ in 0..10 {
-            assert!(!throttle.should_emit(mac));
+            assert!(!throttle.should_emit(MAC1));
         }
     }
 
     #[test]
     fn test_throttle_alternating_devices() {
         let mut throttle = Throttle::new(Duration::from_secs(1));
-        let mac1 = "AA:BB:CC:DD:EE:FF";
-        let mac2 = "11:22:33:44:55:66";
 
         // First events from each device allowed
-        assert!(throttle.should_emit(mac1));
-        assert!(throttle.should_emit(mac2));
+        assert!(throttle.should_emit(MAC1));
+        assert!(throttle.should_emit(MAC2));
 
         // Alternating rapid events all blocked
-        assert!(!throttle.should_emit(mac1));
-        assert!(!throttle.should_emit(mac2));
-        assert!(!throttle.should_emit(mac1));
-        assert!(!throttle.should_emit(mac2));
+        assert!(!throttle.should_emit(MAC1));
+        assert!(!throttle.should_emit(MAC2));
+        assert!(!throttle.should_emit(MAC1));
+        assert!(!throttle.should_emit(MAC2));
     }
 
     #[test]
@@ -263,14 +277,14 @@ mod tests {
         let mut throttle = Throttle::new(Duration::from_secs(1));
 
         // Create 100 different MAC addresses
-        let macs: Vec<String> = (0..100)
-            .map(|i| format!("{:02X}:{:02X}:CC:DD:EE:FF", i / 256, i % 256))
+        let macs: Vec<Address> = (0u8..100)
+            .map(|i| Address([i, i.wrapping_add(1), 0xCC, 0xDD, 0xEE, 0xFF]))
             .collect();
 
         // First event from each should be allowed
         for mac in &macs {
             assert!(
-                throttle.should_emit(mac),
+                throttle.should_emit(*mac),
                 "First event for {} should be allowed",
                 mac
             );
@@ -279,7 +293,7 @@ mod tests {
         // Second event from each should be blocked
         for mac in &macs {
             assert!(
-                !throttle.should_emit(mac),
+                !throttle.should_emit(*mac),
                 "Second event for {} should be blocked",
                 mac
             );
@@ -287,61 +301,47 @@ mod tests {
     }
 
     #[test]
-    fn test_throttle_empty_mac_address() {
+    fn test_throttle_zero_mac_address() {
         let mut throttle = Throttle::new(Duration::from_secs(1));
 
-        // Empty string is a valid key
-        assert!(throttle.should_emit(""));
-        assert!(!throttle.should_emit(""));
+        // Zero address is a valid key
+        assert!(throttle.should_emit(MAC_ZERO));
+        assert!(!throttle.should_emit(MAC_ZERO));
     }
 
     #[test]
     fn test_throttle_timer_resets_on_emit() {
         let mut throttle = Throttle::new(Duration::from_millis(20));
-        let mac = "AA:BB:CC:DD:EE:FF";
 
-        assert!(throttle.should_emit(mac));
+        assert!(throttle.should_emit(MAC1));
 
         // Wait partial interval
         std::thread::sleep(Duration::from_millis(15));
-        assert!(!throttle.should_emit(mac));
+        assert!(!throttle.should_emit(MAC1));
 
         // Wait for full interval from first emit
         std::thread::sleep(Duration::from_millis(10));
-        assert!(throttle.should_emit(mac)); // Allowed - timer reset here
+        assert!(throttle.should_emit(MAC1)); // Allowed - timer reset here
 
         // Immediately after, should be blocked again
-        assert!(!throttle.should_emit(mac));
+        assert!(!throttle.should_emit(MAC1));
     }
 
     #[test]
     fn test_throttle_blocked_event_does_not_reset_timer() {
         let mut throttle = Throttle::new(Duration::from_millis(30));
-        let mac = "AA:BB:CC:DD:EE:FF";
 
-        assert!(throttle.should_emit(mac)); // t=0, timer starts
-
-        std::thread::sleep(Duration::from_millis(10));
-        assert!(!throttle.should_emit(mac)); // t=10, blocked, timer NOT reset
+        assert!(throttle.should_emit(MAC1)); // t=0, timer starts
 
         std::thread::sleep(Duration::from_millis(10));
-        assert!(!throttle.should_emit(mac)); // t=20, still blocked
+        assert!(!throttle.should_emit(MAC1)); // t=10, blocked, timer NOT reset
+
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(!throttle.should_emit(MAC1)); // t=20, still blocked
 
         std::thread::sleep(Duration::from_millis(15));
         // t=35, now past the 30ms interval from t=0
-        assert!(throttle.should_emit(mac)); // Should be allowed
-    }
-
-    #[test]
-    fn test_throttle_case_sensitive_mac() {
-        let mut throttle = Throttle::new(Duration::from_secs(1));
-
-        // MAC addresses are case-sensitive (as strings)
-        assert!(throttle.should_emit("AA:BB:CC:DD:EE:FF"));
-        assert!(throttle.should_emit("aa:bb:cc:dd:ee:ff")); // Different key
-
-        assert!(!throttle.should_emit("AA:BB:CC:DD:EE:FF"));
-        assert!(!throttle.should_emit("aa:bb:cc:dd:ee:ff"));
+        assert!(throttle.should_emit(MAC1)); // Should be allowed
     }
 
     #[test]
@@ -393,105 +393,100 @@ mod tests {
     #[test]
     fn test_throttle_cleanup_stale_entries() {
         let mut throttle = Throttle::new(Duration::from_millis(10));
-        let mac1 = "AA:BB:CC:DD:EE:FF";
-        let mac2 = "11:22:33:44:55:66";
 
         // Add entries for two devices
-        assert!(throttle.should_emit(mac1));
-        assert!(throttle.should_emit(mac2));
+        assert!(throttle.should_emit(MAC1));
+        assert!(throttle.should_emit(MAC2));
 
         // Verify both are tracked
         assert_eq!(throttle.last_seen.len(), 2);
 
         // Manually set one entry to be very old (simulating stale device)
         let old_time = Instant::now() - Duration::from_millis(200); // 20x the interval
-        throttle.last_seen.insert(mac1.to_string(), old_time);
+        throttle.last_seen.insert(MAC1, old_time);
 
         // Trigger cleanup
         throttle.cleanup_stale();
 
         // Stale entry should be removed, active entry should remain
-        assert!(!throttle.last_seen.contains_key(mac1));
-        assert!(throttle.last_seen.contains_key(mac2));
+        assert!(!throttle.last_seen.contains_key(&MAC1));
+        assert!(throttle.last_seen.contains_key(&MAC2));
     }
 
     #[test]
     fn test_throttle_cleanup_preserves_recent_entries() {
         let mut throttle = Throttle::new(Duration::from_millis(10));
-        let mac1 = "AA:BB:CC:DD:EE:FF";
-        let mac2 = "11:22:33:44:55:66";
 
-        assert!(throttle.should_emit(mac1));
-        assert!(throttle.should_emit(mac2));
+        assert!(throttle.should_emit(MAC1));
+        assert!(throttle.should_emit(MAC2));
 
         // Both entries are recent, cleanup should preserve both
         throttle.cleanup_stale();
 
-        assert!(throttle.last_seen.contains_key(mac1));
-        assert!(throttle.last_seen.contains_key(mac2));
+        assert!(throttle.last_seen.contains_key(&MAC1));
+        assert!(throttle.last_seen.contains_key(&MAC2));
     }
 
     #[test]
     fn test_throttle_cleanup_zero_interval() {
         let mut throttle = Throttle::new(Duration::ZERO);
-        let mac = "AA:BB:CC:DD:EE:FF";
 
-        assert!(throttle.should_emit(mac));
+        assert!(throttle.should_emit(MAC1));
         assert_eq!(throttle.last_seen.len(), 1);
 
         // Cleanup with zero interval should be a no-op
         throttle.cleanup_stale();
 
         // Entry should still be there
-        assert!(throttle.last_seen.contains_key(mac));
+        assert!(throttle.last_seen.contains_key(&MAC1));
     }
 
     #[test]
     fn test_throttle_periodic_cleanup() {
         let mut throttle = Throttle::new(Duration::from_millis(10));
-        let stale_mac = "AA:BB:CC:DD:EE:FF";
 
         // Add a stale entry
         let old_time = Instant::now() - Duration::from_millis(200);
-        throttle.last_seen.insert(stale_mac.to_string(), old_time);
+        throttle.last_seen.insert(MAC1, old_time);
 
         // Add enough entries to exceed CLEANUP_SIZE_THRESHOLD
-        for i in 0..CLEANUP_SIZE_THRESHOLD + 10 {
-            let mac = format!("{:02X}:{:02X}:00:00:00:00", i / 256, i % 256);
-            throttle.should_emit(&mac);
+        for i in 0..(CLEANUP_SIZE_THRESHOLD + 10) as u8 {
+            let mac = Address([i, i.wrapping_add(1), 0x00, 0x00, 0x00, 0x00]);
+            throttle.should_emit(mac);
         }
 
+        let trigger_mac = Address([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
         // Call should_emit enough times to trigger cleanup check
         for _ in 0..CLEANUP_CHECK_INTERVAL {
-            throttle.should_emit("FF:FF:FF:FF:FF:FF");
+            throttle.should_emit(trigger_mac);
         }
 
         // Stale entry should be cleaned up
-        assert!(!throttle.last_seen.contains_key(stale_mac));
+        assert!(!throttle.last_seen.contains_key(&MAC1));
     }
 
     #[test]
     fn test_throttle_no_cleanup_below_size_threshold() {
         let mut throttle = Throttle::new(Duration::from_millis(10));
-        let stale_mac = "AA:BB:CC:DD:EE:FF";
 
         // Add a stale entry
         let old_time = Instant::now() - Duration::from_millis(200);
-        throttle.last_seen.insert(stale_mac.to_string(), old_time);
+        throttle.last_seen.insert(MAC1, old_time);
 
         // Add fewer entries than CLEANUP_SIZE_THRESHOLD
-        for i in 0..10 {
-            let mac = format!("{:02X}:00:00:00:00:00", i);
-            throttle.should_emit(&mac);
+        for i in 0..10u8 {
+            let mac = Address([i, 0x00, 0x00, 0x00, 0x00, 0x00]);
+            throttle.should_emit(mac);
         }
 
+        let trigger_mac = Address([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
         // Trigger check interval multiple times
         for _ in 0..CLEANUP_CHECK_INTERVAL * 2 {
-            throttle.should_emit("FF:FF:FF:FF:FF:FF");
+            throttle.should_emit(trigger_mac);
         }
 
         // Stale entry should still exist (cleanup was skipped due to size threshold)
-        assert!(throttle.last_seen.contains_key(stale_mac));
+        assert!(throttle.last_seen.contains_key(&MAC1));
     }
 
     #[test]

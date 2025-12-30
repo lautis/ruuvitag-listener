@@ -86,21 +86,13 @@ impl From<bluer::Error> for ScanError {
     }
 }
 
-/// Format a Bluetooth address as a MAC address string.
-fn format_address(addr: Address) -> String {
-    format!(
-        "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-        addr.0[0], addr.0[1], addr.0[2], addr.0[3], addr.0[4], addr.0[5]
-    )
-}
-
 /// Decode manufacturer data from a RuuviTag into a Measurement.
 ///
 /// This function converts raw manufacturer data bytes into a structured `Measurement`
 /// with all values in standard SI units. Supports RuuviTag V5 and V6 formats.
 ///
 /// # Arguments
-/// * `mac` - The MAC address of the device (formatted as "AA:BB:CC:DD:EE:FF")
+/// * `mac` - The MAC address of the device (efficient 6-byte representation)
 /// * `data` - The manufacturer-specific data bytes (without the company ID prefix)
 ///
 /// # Returns
@@ -109,7 +101,7 @@ fn format_address(addr: Address) -> String {
 /// # Unit Conversions
 /// - Battery voltage: millivolts → Volts (divide by 1000)
 /// - Acceleration: milli-g → g (divide by 1000)
-pub fn decode_ruuvi_data(mac: String, data: &[u8]) -> Result<Measurement, DecodeError> {
+pub fn decode_ruuvi_data(mac: Address, data: &[u8]) -> Result<Measurement, DecodeError> {
     if data.is_empty() {
         return Err(DecodeError::InvalidData("Empty data".into()));
     }
@@ -124,7 +116,7 @@ pub fn decode_ruuvi_data(mac: String, data: &[u8]) -> Result<Measurement, Decode
     }
 }
 
-fn decode_v5_measurement(mac: String, data: &[u8]) -> Result<Measurement, DecodeError> {
+fn decode_v5_measurement(mac: Address, data: &[u8]) -> Result<Measurement, DecodeError> {
     match v5::decode(data) {
         Ok(tag) => {
             let battery_potential = tag.battery_voltage.map(|v| f64::from(v) / 1000.0);
@@ -162,7 +154,7 @@ fn decode_v5_measurement(mac: String, data: &[u8]) -> Result<Measurement, Decode
     }
 }
 
-fn decode_v6_measurement(mac: String, data: &[u8]) -> Result<Measurement, DecodeError> {
+fn decode_v6_measurement(mac: Address, data: &[u8]) -> Result<Measurement, DecodeError> {
     match v6::decode(data) {
         Ok(tag) => {
             Ok(Measurement {
@@ -259,7 +251,6 @@ async fn process_device(
     verbose: bool,
 ) -> Result<(), ScanError> {
     let device = adapter.device(address)?;
-    let mac = format_address(address);
 
     // Try to get manufacturer-specific data from the device
     let manufacturer_data = match device.manufacturer_data().await? {
@@ -273,8 +264,8 @@ async fn process_device(
         None => return Ok(()), // Not a RuuviTag device
     };
 
-    // Decode and send the measurement
-    match decode_ruuvi_data(mac, ruuvi_data) {
+    // Decode and send the measurement (pass Address directly, no string allocation)
+    match decode_ruuvi_data(address, ruuvi_data) {
         Ok(measurement) => {
             let _ = tx.send(Ok(measurement)).await;
         }
@@ -291,16 +282,19 @@ async fn process_device(
 mod tests {
     use super::*;
 
+    const TEST_MAC: Address = Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+
     #[test]
-    fn test_format_address() {
+    fn test_address_display() {
+        // Verify bluer::Address Display trait formats correctly
         let addr = Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-        assert_eq!(format_address(addr), "AA:BB:CC:DD:EE:FF");
+        assert_eq!(addr.to_string(), "AA:BB:CC:DD:EE:FF");
     }
 
     #[test]
-    fn test_format_address_with_zeros() {
+    fn test_address_display_with_zeros() {
         let addr = Address([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
-        assert_eq!(format_address(addr), "00:01:02:03:04:05");
+        assert_eq!(addr.to_string(), "00:01:02:03:04:05");
     }
 
     #[test]
@@ -321,11 +315,11 @@ mod tests {
             0xCB, 0xB8, 0x33, 0x4C, 0x88, 0x4F, // MAC address (ignored in decode)
         ];
 
-        let result = decode_ruuvi_data("AA:BB:CC:DD:EE:FF".to_string(), &data);
+        let result = decode_ruuvi_data(TEST_MAC, &data);
         assert!(result.is_ok());
 
         let measurement = result.unwrap();
-        assert_eq!(measurement.mac, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(measurement.mac, TEST_MAC);
         assert!(measurement.timestamp.elapsed().is_ok()); // Verify timestamp is set
         assert!(measurement.temperature.is_some());
         assert!(measurement.humidity.is_some());
@@ -348,7 +342,7 @@ mod tests {
     #[test]
     fn test_decode_ruuvi_data_invalid() {
         let data: Vec<u8> = vec![0x00, 0x01, 0x02]; // Invalid/too short data
-        let result = decode_ruuvi_data("AA:BB:CC:DD:EE:FF".to_string(), &data);
+        let result = decode_ruuvi_data(TEST_MAC, &data);
         assert!(result.is_err());
     }
 
@@ -360,11 +354,11 @@ mod tests {
             0xFF, 0xCD, 0x00, 0x4C, 0x88, 0x4F,
         ];
 
-        let result = decode_ruuvi_data("AA:BB:CC:DD:EE:FF".to_string(), &data);
+        let result = decode_ruuvi_data(TEST_MAC, &data);
         assert!(result.is_ok());
 
         let measurement = result.unwrap();
-        assert_eq!(measurement.mac, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(measurement.mac, TEST_MAC);
         assert!(measurement.temperature.is_some());
         assert!(measurement.humidity.is_some());
         assert!(measurement.pressure.is_some());

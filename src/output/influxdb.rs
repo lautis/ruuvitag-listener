@@ -1,5 +1,6 @@
 //! InfluxDB line protocol output formatter.
 
+use crate::alias::AliasMap;
 use crate::measurement::Measurement;
 use crate::output::OutputFormatter;
 use std::collections::BTreeMap;
@@ -79,11 +80,14 @@ impl fmt::Display for DataPoint {
 ///
 /// Formats measurements according to the InfluxDB line protocol specification.
 /// Supports configurable measurement name and MAC address aliases.
+///
+/// Uses efficient `Address` keys for alias lookup (O(1) HashMap vs O(log n) BTreeMap),
+/// and only formats addresses to strings during output generation.
 pub struct InfluxDbFormatter {
     /// The measurement name in InfluxDB
     measurement_name: String,
-    /// Aliases for MAC addresses (MAC -> human-readable name)
-    aliases: BTreeMap<String, String>,
+    /// Aliases for MAC addresses (Address -> human-readable name)
+    aliases: AliasMap,
 }
 
 impl InfluxDbFormatter {
@@ -98,7 +102,7 @@ impl InfluxDbFormatter {
     /// # Arguments
     /// * `measurement_name` - The measurement name to use in the line protocol
     /// * `aliases` - A map from MAC addresses to human-readable names
-    pub fn new(measurement_name: String, aliases: BTreeMap<String, String>) -> Self {
+    pub fn new(measurement_name: String, aliases: AliasMap) -> Self {
         Self {
             measurement_name,
             aliases,
@@ -108,14 +112,21 @@ impl InfluxDbFormatter {
     /// Build the tag set for InfluxDB line protocol.
     ///
     /// Tags include the MAC address and a human-readable name (if an alias exists).
+    /// Address is formatted to string only here, at the output boundary.
     fn tag_set(&self, measurement: &Measurement) -> BTreeMap<String, String> {
         let mut tags = BTreeMap::new();
-        let address = &measurement.mac;
-        tags.insert("mac".to_string(), address.clone());
+        let address = measurement.mac;
+        let address_str = address.to_string();
 
-        // Use alias if available, otherwise fall back to MAC address
-        let name = self.aliases.get(address).unwrap_or(address);
-        tags.insert("name".to_string(), name.clone());
+        tags.insert("mac".to_string(), address_str.clone());
+
+        // Use alias if available, otherwise fall back to MAC address string
+        let name = self
+            .aliases
+            .get(&address)
+            .cloned()
+            .unwrap_or(address_str);
+        tags.insert("name".to_string(), name);
 
         tags
     }
@@ -179,6 +190,10 @@ impl OutputFormatter for InfluxDbFormatter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bluer::Address;
+    use std::collections::HashMap;
+
+    const TEST_MAC: Address = Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 
     #[test]
     fn test_field_value_display() {
@@ -236,10 +251,10 @@ mod tests {
 
     #[test]
     fn test_influxdb_formatter_basic() {
-        let formatter = InfluxDbFormatter::new("ruuvi".to_string(), BTreeMap::new());
+        let formatter = InfluxDbFormatter::new("ruuvi".to_string(), HashMap::new());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
         let measurement = Measurement {
-            mac: "AA:BB:CC:DD:EE:FF".to_string(),
+            mac: TEST_MAC,
             timestamp,
             temperature: Some(25.5),
             humidity: Some(60.0),
@@ -281,13 +296,13 @@ mod tests {
 
     #[test]
     fn test_influxdb_formatter_with_alias() {
-        let mut aliases = BTreeMap::new();
-        aliases.insert("AA:BB:CC:DD:EE:FF".to_string(), "Sauna".to_string());
+        let mut aliases = HashMap::new();
+        aliases.insert(TEST_MAC, "Sauna".to_string());
 
         let formatter = InfluxDbFormatter::new("ruuvi".to_string(), aliases);
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
         let measurement = Measurement {
-            mac: "AA:BB:CC:DD:EE:FF".to_string(),
+            mac: TEST_MAC,
             timestamp,
             temperature: Some(80.0),
             humidity: None,
@@ -312,10 +327,10 @@ mod tests {
 
     #[test]
     fn test_influxdb_formatter_partial_data() {
-        let formatter = InfluxDbFormatter::new("ruuvi".to_string(), BTreeMap::new());
+        let formatter = InfluxDbFormatter::new("ruuvi".to_string(), HashMap::new());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
         let measurement = Measurement {
-            mac: "AA:BB:CC:DD:EE:FF".to_string(),
+            mac: TEST_MAC,
             timestamp,
             temperature: Some(25.5),
             humidity: None,

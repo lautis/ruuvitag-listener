@@ -85,10 +85,10 @@ async fn run(options: Options) -> Result<(), scanner::ScanError> {
     while let Some(result) = measurements.recv().await {
         match result {
             Ok(measurement) => {
-                // Check throttle before emitting
+                // Check throttle before emitting (Address is Copy, no allocation)
                 let should_emit = throttle
                     .as_mut()
-                    .is_none_or(|t| t.should_emit(&measurement.mac));
+                    .is_none_or(|t| t.should_emit(measurement.mac));
 
                 if should_emit && let Err(error) = print_measurement(&formatter, &measurement) {
                     eprintln!("error: {}", error);
