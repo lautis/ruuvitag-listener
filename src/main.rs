@@ -2,41 +2,15 @@ use clap::Parser;
 use std::io::Write;
 use std::panic::{self, PanicHookInfo};
 
+mod alias;
 mod measurement;
 mod output;
 mod scanner;
 
+use alias::{Alias, parse_alias};
 use measurement::Measurement;
 use output::OutputFormatter;
 use output::influxdb::InfluxDbFormatter;
-
-/// A parsed alias mapping a MAC address to a human-readable name.
-#[derive(Debug, Clone)]
-pub struct Alias {
-    pub address: String,
-    pub name: String,
-}
-
-fn parse_alias(src: &str) -> Result<Alias, String> {
-    let index = src.find('=');
-    match index {
-        Some(i) => {
-            let (address, name) = src.split_at(i);
-            Ok(Alias {
-                address: address.to_string(),
-                name: name.get(1..).unwrap_or("").to_string(),
-            })
-        }
-        None => Err("invalid alias: expected format MAC=NAME".to_string()),
-    }
-}
-
-fn alias_map(aliases: &[Alias]) -> BTreeMap<String, String> {
-    aliases
-        .iter()
-        .map(|a| (a.address.clone(), a.name.clone()))
-        .collect()
-}
 
 #[derive(Parser, Debug)]
 #[command(author, about, version)]
@@ -61,7 +35,7 @@ fn print_measurement(formatter: &dyn OutputFormatter, measurement: &Measurement)
 }
 
 async fn run(options: Options) -> Result<(), scanner::ScanError> {
-    let aliases = alias_map(&options.alias);
+    let aliases = alias::to_map(&options.alias);
     let formatter = InfluxDbFormatter::new(options.influxdb_measurement.clone(), aliases);
 
     let mut measurements = scanner::start_scan(options.verbose).await?;
@@ -100,51 +74,5 @@ async fn main() {
             eprintln!("error: {}", why);
             std::process::exit(0x1);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_alias_valid() {
-        let result = parse_alias("AA:BB:CC:DD:EE:FF=Kitchen");
-        assert!(result.is_ok());
-        let alias = result.unwrap();
-        assert_eq!(alias.address, "AA:BB:CC:DD:EE:FF");
-        assert_eq!(alias.name, "Kitchen");
-    }
-
-    #[test]
-    fn test_parse_alias_with_spaces() {
-        let result = parse_alias("AA:BB:CC:DD:EE:FF=Living Room");
-        assert!(result.is_ok());
-        let alias = result.unwrap();
-        assert_eq!(alias.name, "Living Room");
-    }
-
-    #[test]
-    fn test_parse_alias_invalid() {
-        let result = parse_alias("no-equals-sign");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_alias_map() {
-        let aliases = vec![
-            Alias {
-                address: "AA:BB:CC:DD:EE:FF".to_string(),
-                name: "Kitchen".to_string(),
-            },
-            Alias {
-                address: "11:22:33:44:55:66".to_string(),
-                name: "Bedroom".to_string(),
-            },
-        ];
-        let map = alias_map(&aliases);
-        assert_eq!(map.get("AA:BB:CC:DD:EE:FF"), Some(&"Kitchen".to_string()));
-        assert_eq!(map.get("11:22:33:44:55:66"), Some(&"Bedroom".to_string()));
-        assert_eq!(map.get("00:00:00:00:00:00"), None);
     }
 }
