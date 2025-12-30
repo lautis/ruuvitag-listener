@@ -87,12 +87,6 @@ pub struct InfluxDbFormatter {
 }
 
 impl InfluxDbFormatter {
-    /// Convert humidity from percent (0-100) to fraction (0-1).
-    #[inline]
-    fn humidity_fraction(percent: f64) -> f64 {
-        percent / 100.0
-    }
-
     /// Convert pressure from Pascals to kilopascals.
     #[inline]
     fn pressure_kpa(pascals: f64) -> f64 {
@@ -129,7 +123,7 @@ impl InfluxDbFormatter {
     /// Build the field set for InfluxDB line protocol.
     ///
     /// Only includes fields that have values (None fields are omitted).
-    /// Performs unit conversions as needed (humidity to fraction, pressure to kPa).
+    /// Performs unit conversions as needed (pressure to kPa).
     fn field_set(&self, m: &Measurement) -> BTreeMap<String, FieldValue> {
         let mut fields = BTreeMap::new();
 
@@ -142,7 +136,7 @@ impl InfluxDbFormatter {
         }
 
         add!("temperature", m.temperature);
-        add!("humidity", m.humidity.map(Self::humidity_fraction));
+        add!("humidity", m.humidity);
         add!("pressure", m.pressure.map(Self::pressure_kpa));
         add!("battery_potential", m.battery);
         add!("tx_power", m.tx_power.map(f64::from));
@@ -203,7 +197,7 @@ mod tests {
 
         let mut fields = BTreeMap::new();
         fields.insert("temperature".to_string(), FieldValue::Float(32.0));
-        fields.insert("humidity".to_string(), FieldValue::Float(0.2));
+        fields.insert("humidity".to_string(), FieldValue::Float(20.0));
 
         let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
 
@@ -217,7 +211,7 @@ mod tests {
 
         assert_eq!(
             result,
-            "test,name=test,test=true humidity=0.2,temperature=32 1000000000000000000"
+            "test,name=test,test=true humidity=20,temperature=32 1000000000000000000"
         );
     }
 
@@ -268,7 +262,7 @@ mod tests {
         assert!(result.starts_with("ruuvi,"));
         assert!(result.contains("mac=AA:BB:CC:DD:EE:FF"));
         assert!(result.contains("temperature=25.5"));
-        assert!(result.contains("humidity=0.6")); // 60% -> 0.6
+        assert!(result.contains("humidity=60")); // 60%
         assert!(result.contains("pressure=101.325")); // Pa -> kPa
         assert!(result.contains("battery_potential=3"));
         assert!(result.contains("tx_power=4"));
