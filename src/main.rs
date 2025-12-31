@@ -88,7 +88,7 @@ async fn run(options: Options) -> Result<(), scanner::ScanError> {
     Ok(())
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     // Set up panic hook to ensure clean exit codes for process managers
     // (e.g., systemd, Telegraf execd) that monitor exit status
