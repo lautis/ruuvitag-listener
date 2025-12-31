@@ -4,7 +4,7 @@
 //! are emitted for each individual RuuviTag. This is useful for reducing output
 //! volume when tags broadcast frequently but data changes slowly.
 
-use bluer::Address;
+use crate::mac_address::MacAddress;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -16,14 +16,14 @@ use std::time::{Duration, Instant};
 /// Stale entries (devices that haven't been seen in a long time) are automatically
 /// cleaned up to prevent memory leaks.
 ///
-/// Uses `bluer::Address` (6-byte array) instead of String for efficient storage
+/// Uses `MacAddress` (6-byte array) instead of String for efficient storage
 /// and zero-allocation lookups.
 #[derive(Debug)]
 pub struct Throttle {
     /// Minimum time between events for each device
     interval: Duration,
-    /// Last event time for each MAC address (using efficient Address keys)
-    last_seen: HashMap<Address, Instant>,
+    /// Last event time for each MAC address (using efficient MacAddress keys)
+    last_seen: HashMap<MacAddress, Instant>,
     /// Counter for periodic cleanup
     check_count: usize,
 }
@@ -74,7 +74,7 @@ impl Throttle {
     ///
     /// # Returns
     /// `true` if the event should be emitted, `false` if it should be throttled
-    pub fn should_emit(&mut self, mac: Address) -> bool {
+    pub fn should_emit(&mut self, mac: MacAddress) -> bool {
         // Periodically clean up stale entries, but only if we have enough
         // entries to make it worthwhile
         self.check_count += 1;
@@ -198,9 +198,9 @@ pub fn parse_duration(src: &str) -> Result<Duration, String> {
 mod tests {
     use super::*;
 
-    const MAC1: Address = Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-    const MAC2: Address = Address([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
-    const MAC_ZERO: Address = Address([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    const MAC1: MacAddress = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+    const MAC2: MacAddress = MacAddress([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+    const MAC_ZERO: MacAddress = MacAddress([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
 
     #[test]
     fn test_throttle_first_event_allowed() {
@@ -277,8 +277,8 @@ mod tests {
         let mut throttle = Throttle::new(Duration::from_secs(1));
 
         // Create 100 different MAC addresses
-        let macs: Vec<Address> = (0u8..100)
-            .map(|i| Address([i, i.wrapping_add(1), 0xCC, 0xDD, 0xEE, 0xFF]))
+        let macs: Vec<MacAddress> = (0u8..100)
+            .map(|i| MacAddress([i, i.wrapping_add(1), 0xCC, 0xDD, 0xEE, 0xFF]))
             .collect();
 
         // First event from each should be allowed
@@ -451,11 +451,11 @@ mod tests {
 
         // Add enough entries to exceed CLEANUP_SIZE_THRESHOLD
         for i in 0..(CLEANUP_SIZE_THRESHOLD + 10) as u8 {
-            let mac = Address([i, i.wrapping_add(1), 0x00, 0x00, 0x00, 0x00]);
+            let mac = MacAddress([i, i.wrapping_add(1), 0x00, 0x00, 0x00, 0x00]);
             throttle.should_emit(mac);
         }
 
-        let trigger_mac = Address([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        let trigger_mac = MacAddress([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
         // Call should_emit enough times to trigger cleanup check
         for _ in 0..CLEANUP_CHECK_INTERVAL {
             throttle.should_emit(trigger_mac);
@@ -475,11 +475,11 @@ mod tests {
 
         // Add fewer entries than CLEANUP_SIZE_THRESHOLD
         for i in 0..10u8 {
-            let mac = Address([i, 0x00, 0x00, 0x00, 0x00, 0x00]);
+            let mac = MacAddress([i, 0x00, 0x00, 0x00, 0x00, 0x00]);
             throttle.should_emit(mac);
         }
 
-        let trigger_mac = Address([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        let trigger_mac = MacAddress([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
         // Trigger check interval multiple times
         for _ in 0..CLEANUP_CHECK_INTERVAL * 2 {
             throttle.should_emit(trigger_mac);

@@ -3,17 +3,17 @@
 //! This module provides functionality to map MAC addresses to human-readable names,
 //! making it easier to identify individual RuuviTag sensors in output.
 
-use bluer::Address;
+use crate::mac_address::MacAddress;
 use std::collections::HashMap;
 
-/// A type alias for MAC-to-name mappings using efficient Address keys.
-pub type AliasMap = HashMap<Address, String>;
+/// A type alias for MAC-to-name mappings using efficient MacAddress keys.
+pub type AliasMap = HashMap<MacAddress, String>;
 
 /// A parsed alias mapping a MAC address to a human-readable name.
 #[derive(Debug, Clone)]
 pub struct Alias {
     /// The MAC address as an efficient 6-byte array
-    pub address: Address,
+    pub address: MacAddress,
     /// The human-readable name (e.g., "Sauna")
     pub name: String,
 }
@@ -39,9 +39,9 @@ pub fn parse_alias(src: &str) -> Result<Alias, String> {
         .split_once('=')
         .ok_or_else(|| "invalid alias: expected format MAC=NAME".to_string())?;
 
-    let address: Address = address_str
+    let address: MacAddress = address_str
         .parse()
-        .map_err(|_| format!("invalid MAC address: {}", address_str))?;
+        .map_err(|e| format!("invalid MAC address: {}", e))?;
 
     Ok(Alias {
         address,
@@ -72,7 +72,10 @@ mod tests {
         let result = parse_alias("AA:BB:CC:DD:EE:FF=Kitchen");
         assert!(result.is_ok());
         let alias = result.unwrap();
-        assert_eq!(alias.address, Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]));
+        assert_eq!(
+            alias.address,
+            MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])
+        );
         assert_eq!(alias.name, "Kitchen");
     }
 
@@ -82,6 +85,18 @@ mod tests {
         assert!(result.is_ok());
         let alias = result.unwrap();
         assert_eq!(alias.name, "Living Room");
+    }
+
+    #[test]
+    fn test_parse_alias_lowercase() {
+        let result = parse_alias("aa:bb:cc:dd:ee:ff=Kitchen");
+        assert!(result.is_ok());
+        let alias = result.unwrap();
+        // Should be parsed correctly (case-insensitive hex)
+        assert_eq!(
+            alias.address,
+            MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])
+        );
     }
 
     #[test]
@@ -100,25 +115,25 @@ mod tests {
     fn test_to_map() {
         let aliases = vec![
             Alias {
-                address: Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]),
+                address: MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]),
                 name: "Kitchen".to_string(),
             },
             Alias {
-                address: Address([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]),
+                address: MacAddress([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]),
                 name: "Bedroom".to_string(),
             },
         ];
         let map = to_map(&aliases);
         assert_eq!(
-            map.get(&Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])),
+            map.get(&MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])),
             Some(&"Kitchen".to_string())
         );
         assert_eq!(
-            map.get(&Address([0x11, 0x22, 0x33, 0x44, 0x55, 0x66])),
+            map.get(&MacAddress([0x11, 0x22, 0x33, 0x44, 0x55, 0x66])),
             Some(&"Bedroom".to_string())
         );
         assert_eq!(
-            map.get(&Address([0x00, 0x00, 0x00, 0x00, 0x00, 0x00])),
+            map.get(&MacAddress([0x00, 0x00, 0x00, 0x00, 0x00, 0x00])),
             None
         );
     }

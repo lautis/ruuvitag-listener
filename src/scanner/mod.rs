@@ -1,12 +1,16 @@
-//! BLE scanner for RuuviTag devices using bluer.
+//! BLE scanner abstraction for RuuviTag devices.
 //!
-//! This module provides functionality to scan for RuuviTag BLE advertisements
-//! and decode their sensor data.
+//! This module provides a trait-based abstraction over different Bluetooth
+//! scanning backends, with shared decoding logic for RuuviTag sensor data.
 
+#[cfg(feature = "bluer")]
+pub mod bluer;
+
+#[cfg(feature = "hci")]
+pub mod hci;
+
+use crate::mac_address::MacAddress;
 use crate::measurement::Measurement;
-use bluer::monitor::{Monitor, MonitorEvent, Pattern};
-use bluer::{Adapter, Address, Session};
-use futures::StreamExt;
 use ruuvi_decoders::{v5, v6};
 use std::time::SystemTime;
 use tokio::sync::mpsc;
@@ -37,30 +41,16 @@ impl std::error::Error for DecodeError {}
 /// Convenience alias for decoded measurements or decode errors.
 pub type MeasurementResult = Result<Measurement, DecodeError>;
 
-/// Ruuvi Innovations manufacturer ID (little-endian bytes for pattern matching).
-///
-/// Bluetooth LE advertisements use little-endian byte order for manufacturer IDs.
-/// This is the byte representation of 0x0499 used for filtering advertisements.
-/// See: https://github.com/ruuvi/ruuvi-sensor-protocols
-const RUUVI_MANUFACTURER_ID_BYTES: [u8; 2] = [0x99, 0x04];
-
-/// Ruuvi Innovations manufacturer ID for data lookup.
-///
-/// This is the big-endian representation (0x0499) used when looking up
-/// manufacturer-specific data from device advertisements.
-const RUUVI_MANUFACTURER_ID: u16 = 0x0499;
-
-/// Bluetooth manufacturer-specific data type (AD type 0xFF)
-const MANUFACTURER_DATA_TYPE: u8 = 0xff;
-
-/// Channel buffer size for measurement results.
-const MEASUREMENT_CHANNEL_BUFFER_SIZE: usize = 100;
-
 /// Error type for scanner operations.
 #[derive(Debug)]
 pub enum ScanError {
-    Bluetooth(bluer::Error),
+    /// Bluetooth/adapter related error
+    Bluetooth(String),
+    /// Data decoding error
     Decode(DecodeError),
+    /// Backend not available (not compiled in)
+    #[allow(dead_code)]
+    BackendNotAvailable(String),
 }
 
 impl std::fmt::Display for ScanError {
@@ -68,6 +58,9 @@ impl std::fmt::Display for ScanError {
         match self {
             ScanError::Bluetooth(e) => write!(f, "Bluetooth error: {}", e),
             ScanError::Decode(e) => write!(f, "Decode error: {}", e),
+            ScanError::BackendNotAvailable(name) => {
+                write!(f, "Backend '{}' not available (not compiled in)", name)
+            }
         }
     }
 }
@@ -80,9 +73,56 @@ impl From<DecodeError> for ScanError {
 
 impl std::error::Error for ScanError {}
 
-impl From<bluer::Error> for ScanError {
-    fn from(err: bluer::Error) -> Self {
-        ScanError::Bluetooth(err)
+/// Ruuvi Innovations manufacturer ID (little-endian bytes for pattern matching).
+///
+/// Bluetooth LE advertisements use little-endian byte order for manufacturer IDs.
+/// This is the byte representation of 0x0499 used for filtering advertisements.
+/// See: https://github.com/ruuvi/ruuvi-sensor-protocols
+#[cfg(feature = "bluer")]
+pub const RUUVI_MANUFACTURER_ID_BYTES: [u8; 2] = [0x99, 0x04];
+
+/// Ruuvi Innovations manufacturer ID for data lookup.
+///
+/// This is the big-endian representation (0x0499) used when looking up
+/// manufacturer-specific data from device advertisements.
+#[cfg(any(feature = "bluer", feature = "hci"))]
+pub const RUUVI_MANUFACTURER_ID: u16 = 0x0499;
+
+/// Bluetooth manufacturer-specific data type (AD type 0xFF)
+#[cfg(feature = "bluer")]
+pub const MANUFACTURER_DATA_TYPE: u8 = 0xff;
+
+/// Channel buffer size for measurement results.
+pub const MEASUREMENT_CHANNEL_BUFFER_SIZE: usize = 100;
+
+/// Available scanner backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Backend {
+    /// BlueZ D-Bus backend (requires bluetoothd daemon)
+    #[default]
+    Bluer,
+    /// Raw HCI socket backend (direct kernel access, no daemon required)
+    Hci,
+}
+
+impl std::fmt::Display for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Backend::Bluer => write!(f, "bluer"),
+            Backend::Hci => write!(f, "hci"),
+        }
+    }
+}
+
+impl std::str::FromStr for Backend {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "bluer" | "bluez" => Ok(Backend::Bluer),
+            "hci" | "raw" => Ok(Backend::Hci),
+            _ => Err(format!("Unknown backend: {}", s)),
+        }
     }
 }
 
@@ -92,7 +132,7 @@ impl From<bluer::Error> for ScanError {
 /// with all values in standard SI units. Supports RuuviTag V5 and V6 formats.
 ///
 /// # Arguments
-/// * `mac` - The MAC address of the device (efficient 6-byte representation)
+/// * `mac` - The MAC address of the device
 /// * `data` - The manufacturer-specific data bytes (without the company ID prefix)
 ///
 /// # Returns
@@ -101,7 +141,7 @@ impl From<bluer::Error> for ScanError {
 /// # Unit Conversions
 /// - Battery voltage: millivolts → Volts (divide by 1000)
 /// - Acceleration: milli-g → g (divide by 1000)
-pub fn decode_ruuvi_data(mac: Address, data: &[u8]) -> Result<Measurement, DecodeError> {
+pub fn decode_ruuvi_data(mac: MacAddress, data: &[u8]) -> Result<Measurement, DecodeError> {
     if data.is_empty() {
         return Err(DecodeError::InvalidData("Empty data".into()));
     }
@@ -116,7 +156,7 @@ pub fn decode_ruuvi_data(mac: Address, data: &[u8]) -> Result<Measurement, Decod
     }
 }
 
-fn decode_v5_measurement(mac: Address, data: &[u8]) -> Result<Measurement, DecodeError> {
+fn decode_v5_measurement(mac: MacAddress, data: &[u8]) -> Result<Measurement, DecodeError> {
     match v5::decode(data) {
         Ok(tag) => {
             let battery_potential = tag.battery_voltage.map(|v| f64::from(v) / 1000.0);
@@ -154,148 +194,82 @@ fn decode_v5_measurement(mac: Address, data: &[u8]) -> Result<Measurement, Decod
     }
 }
 
-fn decode_v6_measurement(mac: Address, data: &[u8]) -> Result<Measurement, DecodeError> {
+fn decode_v6_measurement(mac: MacAddress, data: &[u8]) -> Result<Measurement, DecodeError> {
     match v6::decode(data) {
-        Ok(tag) => {
-            Ok(Measurement {
-                mac,
-                timestamp: SystemTime::now(),
-                temperature: tag.temperature,
-                humidity: tag.humidity,
-                // Decoder returns hPa; store as Pa to stay consistent with v5 handling.
-                pressure: tag.pressure.map(|hpa| hpa * 100.0),
-                battery: None,
-                tx_power: None,
-                movement_counter: None,
-                measurement_sequence: tag.measurement_sequence.map(u32::from),
-                acceleration: None,
-                pm2_5: tag.pm2_5,
-                co2: tag.co2.map(f64::from),
-                voc_index: tag.voc_index.map(f64::from),
-                nox_index: tag.nox_index.map(f64::from),
-                luminosity: tag.luminosity,
-            })
-        }
+        Ok(tag) => Ok(Measurement {
+            mac,
+            timestamp: SystemTime::now(),
+            temperature: tag.temperature,
+            humidity: tag.humidity,
+            // Decoder returns hPa; store as Pa to stay consistent with v5 handling.
+            pressure: tag.pressure.map(|hpa| hpa * 100.0),
+            battery: None,
+            tx_power: None,
+            movement_counter: None,
+            measurement_sequence: tag.measurement_sequence.map(u32::from),
+            acceleration: None,
+            pm2_5: tag.pm2_5,
+            co2: tag.co2.map(f64::from),
+            voc_index: tag.voc_index.map(f64::from),
+            nox_index: tag.nox_index.map(f64::from),
+            luminosity: tag.luminosity,
+        }),
         Err(e) => Err(DecodeError::DecoderError(format!(
             "Failed to decode RuuviTag data: {e:?}"
         ))),
     }
 }
 
-/// Start scanning for RuuviTag devices.
+/// Start scanning for RuuviTag devices using the specified backend.
 ///
-/// This function initializes the Bluetooth adapter and starts a passive scan
-/// for RuuviTag advertisements. Discovered measurements are sent through the
-/// returned channel. Runs indefinitely until interrupted.
+/// This is the main entry point for creating a scanner. It dispatches to the
+/// appropriate backend implementation based on the `backend` parameter.
 ///
 /// # Arguments
+/// * `backend` - The scanner backend to use
 /// * `verbose` - If true, decode errors are sent as Err values; otherwise they're silently dropped.
 ///
 /// # Returns
 /// A receiver for measurements (or decode errors if verbose).
-pub async fn start_scan(verbose: bool) -> Result<mpsc::Receiver<MeasurementResult>, ScanError> {
-    let session = Session::new().await?;
-    let adapter = session.default_adapter().await?;
-    adapter.set_powered(true).await?;
-
-    let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
-
-    // Create a pattern to filter for Ruuvi manufacturer data
-    let pattern = Pattern {
-        data_type: MANUFACTURER_DATA_TYPE,
-        start_position: 0,
-        content: RUUVI_MANUFACTURER_ID_BYTES.to_vec(),
-    };
-
-    let monitor_manager = adapter.monitor().await?;
-    let mut monitor_handle = monitor_manager
-        .register(Monitor {
-            patterns: Some(vec![pattern]),
-            ..Default::default()
-        })
-        .await?;
-
-    // Spawn a task that owns all Bluetooth state and runs the event loop
-    tokio::spawn(async move {
-        // Keep all Bluetooth state alive by moving it into this task
-        let _session = session;
-        let _monitor_manager = monitor_manager;
-
-        while let Some(event) = monitor_handle.next().await {
-            if let MonitorEvent::DeviceFound(device_id) = event
-                && let Err(e) = process_device(&adapter, device_id.device, &tx, verbose).await
-                && verbose
+///
+/// # Errors
+/// Returns `ScanError::BackendNotAvailable` if the requested backend was not compiled in.
+pub async fn start_scan(
+    backend: Backend,
+    verbose: bool,
+) -> Result<mpsc::Receiver<MeasurementResult>, ScanError> {
+    match backend {
+        Backend::Bluer => {
+            #[cfg(feature = "bluer")]
             {
-                let err = match e {
-                    ScanError::Bluetooth(e) => {
-                        DecodeError::InvalidData(format!("Bluetooth error: {e}"))
-                    }
-                    ScanError::Decode(e) => e,
-                };
-                let _ = tx.send(Err(err)).await;
+                bluer::start_scan(verbose).await
+            }
+            #[cfg(not(feature = "bluer"))]
+            {
+                let _ = verbose;
+                Err(ScanError::BackendNotAvailable("bluer".into()))
             }
         }
-    });
-
-    Ok(rx)
-}
-
-/// Process a discovered Bluetooth device and extract RuuviTag measurements.
-///
-/// This function attempts to read manufacturer data from the device and decode it
-/// as a RuuviTag measurement. Results are sent through the provided channel.
-async fn process_device(
-    adapter: &Adapter,
-    address: Address,
-    tx: &mpsc::Sender<MeasurementResult>,
-    verbose: bool,
-) -> Result<(), ScanError> {
-    let device = adapter.device(address)?;
-
-    // Try to get manufacturer-specific data from the device
-    let manufacturer_data = match device.manufacturer_data().await? {
-        Some(data) => data,
-        None => return Ok(()), // No manufacturer data available
-    };
-
-    // Extract RuuviTag data if present
-    let ruuvi_data = match manufacturer_data.get(&RUUVI_MANUFACTURER_ID) {
-        Some(data) => data,
-        None => return Ok(()), // Not a RuuviTag device
-    };
-
-    // Decode and send the measurement (pass Address directly, no string allocation)
-    match decode_ruuvi_data(address, ruuvi_data) {
-        Ok(measurement) => {
-            let _ = tx.send(Ok(measurement)).await;
+        Backend::Hci => {
+            #[cfg(feature = "hci")]
+            {
+                hci::start_scan(verbose).await
+            }
+            #[cfg(not(feature = "hci"))]
+            {
+                let _ = verbose;
+                Err(ScanError::BackendNotAvailable("hci".into()))
+            }
         }
-        Err(e) if verbose => {
-            let _ = tx.send(Err(e)).await;
-        }
-        _ => {}
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
-    const TEST_MAC: Address = Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-
-    #[test]
-    fn test_address_display() {
-        // Verify bluer::Address Display trait formats correctly
-        let addr = Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-        assert_eq!(addr.to_string(), "AA:BB:CC:DD:EE:FF");
-    }
-
-    #[test]
-    fn test_address_display_with_zeros() {
-        let addr = Address([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
-        assert_eq!(addr.to_string(), "00:01:02:03:04:05");
-    }
+    const TEST_MAC: MacAddress = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 
     #[test]
     fn test_decode_ruuvi_data_v5() {
@@ -389,5 +363,20 @@ mod tests {
         let decode_err = DecodeError::InvalidData("test error".to_string());
         let err = ScanError::Decode(decode_err);
         assert_eq!(format!("{}", err), "Decode error: Invalid data: test error");
+    }
+
+    #[test]
+    fn test_backend_from_str() {
+        assert_eq!(Backend::from_str("bluer").unwrap(), Backend::Bluer);
+        assert_eq!(Backend::from_str("bluez").unwrap(), Backend::Bluer);
+        assert_eq!(Backend::from_str("hci").unwrap(), Backend::Hci);
+        assert_eq!(Backend::from_str("raw").unwrap(), Backend::Hci);
+        assert!(Backend::from_str("invalid").is_err());
+    }
+
+    #[test]
+    fn test_backend_display() {
+        assert_eq!(format!("{}", Backend::Bluer), "bluer");
+        assert_eq!(format!("{}", Backend::Hci), "hci");
     }
 }

@@ -8,11 +8,17 @@ repository = "https://github.com/lautis/ruuvitag-listener"
 keywords = ["ruuvi", "ruuvitag", "telegraf"]
 edition = "2024"
 
+[features]
+default = ["bluer", "hci"]
+bluer = ["dep:bluer", "dep:futures"]
+hci = ["dep:libc", "tokio/net"]
+
 [dependencies]
-bluer = { version = "0.17", features = ["bluetoothd"] }
+bluer = { version = "0.17", features = ["bluetoothd"], optional = true }
+libc = { version = "0.2", optional = true }
 ruuvi-decoders = "1.0"
 tokio = { version = "1", features = ["rt", "macros", "sync"] }
-futures = "0.3"
+futures = { version = "0.3", optional = true }
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]

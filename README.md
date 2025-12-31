@@ -9,8 +9,61 @@ The output can be used in e.g. [Telegraf Execd Input](https://github.com/influxd
 ## Requirements
 
 - RuuviTag Bluetooth sensor
-- Linux with BlueZ Bluetooth stack
-- DBus (for Bluetooth access via BlueZ)
+- Linux with Bluetooth adapter
+
+## Bluetooth Backends
+
+Two Bluetooth backends are available:
+
+### BlueZ (default)
+
+Uses the BlueZ D-Bus API to communicate with the Bluetooth adapter. This is the default backend.
+
+**Requirements:**
+- BlueZ daemon (`bluetoothd`) running
+- D-Bus
+- Experimental features enabled in BlueZ (see [Troubleshooting](#troubleshooting))
+
+**Usage:**
+```sh
+ruuvitag-listener --backend bluer
+```
+
+### HCI (raw sockets)
+
+Uses raw HCI sockets for direct kernel access, bypassing BlueZ. Useful when BlueZ is unavailable or for minimal deployments.
+
+**Requirements:**
+- `CAP_NET_ADMIN` and `CAP_NET_RAW` capabilities, or root privileges
+- BlueZ daemon might need to be stopped
+- HCI device brought up manually
+
+**Setup:**
+```sh
+# Set capabilities (must be re-run after each rebuild)
+sudo setcap 'cap_net_admin,cap_net_raw+ep' ruuvitag-listener
+
+# Stop BlueZ and bring up the device
+sudo systemctl stop bluetooth
+sudo hciconfig hci0 up
+
+# Run with HCI backend
+ruuvitag-listener --backend hci
+```
+
+### Building with a single backend
+
+By default, all backends are compiled. To build with only the e.g. HCI backend (smaller binary, no D-Bus dependency):
+
+```sh
+cargo build --release --no-default-features --features hci
+```
+
+To build with only Bluer backend:
+
+```sh
+cargo build --release --no-default-features --features bluer
+```
 
 ## Installation
 
@@ -58,7 +111,9 @@ All options can be listed with `ruuvitag-listener --help`.
 
 ## Troubleshooting
 
-If you see a confusing error related to DBus, you probably need to enable bluetoothd with experimental features. Add the following to `/etc/bluetooth/main.conf`:
+### BlueZ backend: D-Bus errors
+
+If you see errors related to D-Bus when using the BlueZ backend, you probably need to enable experimental features in bluetoothd. Add the following to `/etc/bluetooth/main.conf`:
 
 ```
 [General]
@@ -69,6 +124,24 @@ Then restart bluetoothd:
 
 ```sh
 sudo systemctl restart bluetooth
+```
+
+### HCI backend: Permission denied
+
+If you get "Operation not permitted" errors with the HCI backend, ensure capabilities are set:
+
+```sh
+sudo setcap 'cap_net_admin,cap_net_raw+ep' ruuvitag-listener
+getcap ruuvitag-listener  # Verify: should show cap_net_admin,cap_net_raw=ep
+```
+
+### HCI backend: Network is down
+
+If you get "Network is down" errors, the Bluetooth adapter needs to be brought up:
+
+```sh
+sudo systemctl stop bluetooth  # Stop BlueZ first
+sudo hciconfig hci0 up         # Bring up the adapter
 ```
 
 ## Development

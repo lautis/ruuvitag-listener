@@ -1,4 +1,6 @@
-use bluer::Address;
+//! RuuviTag measurement data structure.
+
+use crate::mac_address::MacAddress;
 
 /// A measurement from a RuuviTag sensor.
 ///
@@ -16,7 +18,7 @@ use bluer::Address;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Measurement {
     /// MAC address of the RuuviTag (stored as efficient 6-byte array)
-    pub mac: Address,
+    pub mac: MacAddress,
     /// Timestamp when the measurement was taken
     pub timestamp: std::time::SystemTime,
     /// Temperature in Celsius
@@ -55,7 +57,7 @@ mod tests {
     fn test_measurement_with_values() {
         let timestamp = std::time::SystemTime::now();
         let m = Measurement {
-            mac: Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]),
+            mac: MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]),
             timestamp,
             temperature: Some(25.5),
             humidity: Some(60.0),
@@ -72,6 +74,7 @@ mod tests {
             luminosity: Some(123.0),
         };
 
+        assert_eq!(m.mac, MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]));
         assert_eq!(m.timestamp, timestamp);
         assert_eq!(m.temperature, Some(25.5));
         assert_eq!(m.humidity, Some(60.0));
@@ -91,7 +94,7 @@ mod tests {
     #[test]
     fn test_measurement_clone() {
         let m1 = Measurement {
-            mac: Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]),
+            mac: MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]),
             temperature: Some(25.5),
             humidity: None,
             pressure: None,

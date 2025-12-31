@@ -1,9 +1,10 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::io::Write;
 use std::panic::{self, PanicHookInfo};
 use std::time::Duration;
 
 mod alias;
+mod mac_address;
 mod measurement;
 mod output;
 mod scanner;
@@ -13,12 +14,71 @@ use alias::{Alias, parse_alias};
 use measurement::Measurement;
 use output::OutputFormatter;
 use output::influxdb::InfluxDbFormatter;
+use scanner::Backend;
 use throttle::{Throttle, parse_duration};
 
 /// Exit codes for the application
 const EXIT_SUCCESS: i32 = 0;
 const EXIT_ERROR: i32 = 1;
 const EXIT_PANIC: i32 = 2;
+
+/// CLI-compatible wrapper for Backend enum
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BackendArg {
+    /// BlueZ D-Bus backend (requires bluetoothd daemon)
+    #[cfg(feature = "bluer")]
+    Bluer,
+    /// Raw HCI socket backend (direct kernel access, no daemon required)
+    #[cfg(feature = "hci")]
+    Hci,
+}
+
+impl From<BackendArg> for Backend {
+    fn from(arg: BackendArg) -> Self {
+        match arg {
+            #[cfg(feature = "bluer")]
+            BackendArg::Bluer => Backend::Bluer,
+            #[cfg(feature = "hci")]
+            BackendArg::Hci => Backend::Hci,
+        }
+    }
+}
+
+/// Returns the default backend argument as a string for CLI.
+const fn default_backend_str() -> &'static str {
+    #[cfg(feature = "bluer")]
+    {
+        "bluer"
+    }
+    #[cfg(all(feature = "hci", not(feature = "bluer")))]
+    {
+        "hci"
+    }
+    #[cfg(not(any(feature = "bluer", feature = "hci")))]
+    {
+        compile_error!("At least one backend feature must be enabled");
+    }
+}
+
+/// Returns a help string listing available backends.
+const fn backend_help() -> &'static str {
+    #[cfg(all(feature = "bluer", feature = "hci"))]
+    {
+        "Bluetooth scanner backend [available: bluer, hci]"
+    }
+    #[cfg(all(feature = "bluer", not(feature = "hci")))]
+    {
+        "Bluetooth scanner backend [available: bluer]"
+    }
+    #[cfg(all(feature = "hci", not(feature = "bluer")))]
+    {
+        "Bluetooth scanner backend [available: hci]"
+    }
+    #[cfg(not(any(feature = "bluer", feature = "hci")))]
+    {
+        compile_error!("At least one backend feature must be enabled");
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(author, about, version)]
@@ -41,6 +101,9 @@ struct Options {
     /// Without suffix, value is interpreted as seconds.
     #[arg(long, value_parser = parse_duration)]
     throttle: Option<Duration>,
+    /// Bluetooth scanner backend to use
+    #[arg(long, value_enum, default_value = default_backend_str(), help = backend_help())]
+    backend: BackendArg,
 }
 
 /// Print a formatted measurement to stdout.
@@ -76,11 +139,12 @@ fn print_measurement(
 async fn run(options: Options) -> Result<(), scanner::ScanError> {
     let aliases = alias::to_map(&options.alias);
     let formatter = InfluxDbFormatter::new(options.influxdb_measurement.clone(), aliases);
+    let backend: Backend = options.backend.into();
 
     // Create throttle if interval is specified
     let mut throttle = options.throttle.map(Throttle::new);
 
-    let mut measurements = scanner::start_scan(options.verbose).await?;
+    let mut measurements = scanner::start_scan(backend, options.verbose).await?;
 
     while let Some(result) = measurements.recv().await {
         match result {
@@ -88,7 +152,7 @@ async fn run(options: Options) -> Result<(), scanner::ScanError> {
                 // Check throttle before emitting (Address is Copy, no allocation)
                 let should_emit = throttle
                     .as_mut()
-                    .is_none_or(|t| t.should_emit(measurement.mac));
+                    .is_none_or(|t: &mut Throttle| t.should_emit(measurement.mac));
 
                 if should_emit && let Err(error) = print_measurement(&formatter, &measurement) {
                     eprintln!("error: {}", error);
