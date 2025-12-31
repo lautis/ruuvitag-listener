@@ -117,6 +117,9 @@ mod tests {
             map.get(&Address([0x11, 0x22, 0x33, 0x44, 0x55, 0x66])),
             Some(&"Bedroom".to_string())
         );
-        assert_eq!(map.get(&Address([0x00, 0x00, 0x00, 0x00, 0x00, 0x00])), None);
+        assert_eq!(
+            map.get(&Address([0x00, 0x00, 0x00, 0x00, 0x00, 0x00])),
+            None
+        );
     }
 }

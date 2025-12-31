@@ -121,11 +121,7 @@ impl InfluxDbFormatter {
         tags.insert("mac".to_string(), address_str.clone());
 
         // Use alias if available, otherwise fall back to MAC address string
-        let name = self
-            .aliases
-            .get(&address)
-            .cloned()
-            .unwrap_or(address_str);
+        let name = self.aliases.get(&address).cloned().unwrap_or(address_str);
         tags.insert("name".to_string(), name);
 
         tags
