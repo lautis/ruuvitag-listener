@@ -3,16 +3,17 @@
 //! This module provides functionality to map MAC addresses to human-readable names,
 //! making it easier to identify individual RuuviTag sensors in output.
 
-use std::collections::BTreeMap;
+use bluer::Address;
+use std::collections::HashMap;
 
-/// A type alias for MAC-to-name mappings.
-pub type AliasMap = BTreeMap<String, String>;
+/// A type alias for MAC-to-name mappings using efficient Address keys.
+pub type AliasMap = HashMap<Address, String>;
 
 /// A parsed alias mapping a MAC address to a human-readable name.
 #[derive(Debug, Clone)]
 pub struct Alias {
-    /// The MAC address (e.g., "AA:BB:CC:DD:EE:FF")
-    pub address: String,
+    /// The MAC address as an efficient 6-byte array
+    pub address: Address,
     /// The human-readable name (e.g., "Sauna")
     pub name: String,
 }
@@ -30,16 +31,22 @@ pub struct Alias {
 /// use ruuvitag_listener::alias::parse_alias;
 ///
 /// let alias = parse_alias("AA:BB:CC:DD:EE:FF=Kitchen").unwrap();
-/// assert_eq!(alias.address, "AA:BB:CC:DD:EE:FF");
+/// assert_eq!(alias.address.to_string(), "AA:BB:CC:DD:EE:FF");
 /// assert_eq!(alias.name, "Kitchen");
 /// ```
 pub fn parse_alias(src: &str) -> Result<Alias, String> {
-    src.split_once('=')
-        .map(|(address, name)| Alias {
-            address: address.into(),
-            name: name.into(),
-        })
-        .ok_or_else(|| "invalid alias: expected format MAC=NAME".into())
+    let (address_str, name) = src
+        .split_once('=')
+        .ok_or_else(|| "invalid alias: expected format MAC=NAME".to_string())?;
+
+    let address: Address = address_str
+        .parse()
+        .map_err(|_| format!("invalid MAC address: {}", address_str))?;
+
+    Ok(Alias {
+        address,
+        name: name.into(),
+    })
 }
 
 /// Convert a slice of Alias values into an AliasMap.
@@ -48,11 +55,11 @@ pub fn parse_alias(src: &str) -> Result<Alias, String> {
 /// * `aliases` - A slice of Alias structs
 ///
 /// # Returns
-/// A BTreeMap mapping MAC addresses to their human-readable names.
+/// A HashMap mapping MAC addresses to their human-readable names.
 pub fn to_map(aliases: &[Alias]) -> AliasMap {
     aliases
         .iter()
-        .map(|a| (a.address.clone(), a.name.clone()))
+        .map(|a| (a.address, a.name.clone()))
         .collect()
 }
 
@@ -65,7 +72,7 @@ mod tests {
         let result = parse_alias("AA:BB:CC:DD:EE:FF=Kitchen");
         assert!(result.is_ok());
         let alias = result.unwrap();
-        assert_eq!(alias.address, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(alias.address, Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]));
         assert_eq!(alias.name, "Kitchen");
     }
 
@@ -78,8 +85,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_alias_invalid() {
+    fn test_parse_alias_invalid_format() {
         let result = parse_alias("no-equals-sign");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_alias_invalid_mac() {
+        let result = parse_alias("invalid-mac=Kitchen");
         assert!(result.is_err());
     }
 
@@ -87,17 +100,26 @@ mod tests {
     fn test_to_map() {
         let aliases = vec![
             Alias {
-                address: "AA:BB:CC:DD:EE:FF".to_string(),
+                address: Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]),
                 name: "Kitchen".to_string(),
             },
             Alias {
-                address: "11:22:33:44:55:66".to_string(),
+                address: Address([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]),
                 name: "Bedroom".to_string(),
             },
         ];
         let map = to_map(&aliases);
-        assert_eq!(map.get("AA:BB:CC:DD:EE:FF"), Some(&"Kitchen".to_string()));
-        assert_eq!(map.get("11:22:33:44:55:66"), Some(&"Bedroom".to_string()));
-        assert_eq!(map.get("00:00:00:00:00:00"), None);
+        assert_eq!(
+            map.get(&Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])),
+            Some(&"Kitchen".to_string())
+        );
+        assert_eq!(
+            map.get(&Address([0x11, 0x22, 0x33, 0x44, 0x55, 0x66])),
+            Some(&"Bedroom".to_string())
+        );
+        assert_eq!(
+            map.get(&Address([0x00, 0x00, 0x00, 0x00, 0x00, 0x00])),
+            None
+        );
     }
 }

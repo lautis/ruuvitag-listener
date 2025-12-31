@@ -1,3 +1,5 @@
+use bluer::Address;
+
 /// A measurement from a RuuviTag sensor.
 ///
 /// All values are in standard SI units:
@@ -13,8 +15,8 @@
 /// - Luminosity in lux
 #[derive(Debug, Clone, PartialEq)]
 pub struct Measurement {
-    /// MAC address of the RuuviTag
-    pub mac: String,
+    /// MAC address of the RuuviTag (stored as efficient 6-byte array)
+    pub mac: Address,
     /// Timestamp when the measurement was taken
     pub timestamp: std::time::SystemTime,
     /// Temperature in Celsius
@@ -53,7 +55,7 @@ mod tests {
     fn test_measurement_with_values() {
         let timestamp = std::time::SystemTime::now();
         let m = Measurement {
-            mac: "AA:BB:CC:DD:EE:FF".to_string(),
+            mac: Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]),
             timestamp,
             temperature: Some(25.5),
             humidity: Some(60.0),
@@ -89,7 +91,7 @@ mod tests {
     #[test]
     fn test_measurement_clone() {
         let m1 = Measurement {
-            mac: "AA:BB:CC:DD:EE:FF".to_string(),
+            mac: Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]),
             temperature: Some(25.5),
             humidity: None,
             pressure: None,
