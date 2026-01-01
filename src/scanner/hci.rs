@@ -195,11 +195,25 @@ fn bind_hci_socket(fd: &OwnedFd, dev_id: u16) -> Result<(), ScanError> {
     Ok(())
 }
 
-/// Set HCI socket filter
+/// Set HCI socket filter for kernel-level packet filtering.
+///
+/// This is the first layer of kernel-level filtering. It configures the HCI
+/// subsystem to only deliver LE Meta Events to userspace, dropping:
+/// - HCI command packets
+/// - ACL data packets
+/// - SCO audio packets
+/// - All other HCI events (connection, disconnection, encryption, etc.)
+///
+/// This significantly reduces CPU wakeups since the kernel discards irrelevant
+/// packets before any userspace context switch or memory copy occurs.
+///
+/// Note: HCI_FILTER cannot filter by LE subevent type, so we still receive
+/// all LE Meta Events (connection complete, advertising reports, etc.).
+/// The BPF filter (set_bpf_ruuvi_filter) provides finer-grained filtering.
 fn set_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
     let mut filter = HciFilter::new();
-    filter.set_ptype(HCI_EVENT_PKT);
-    filter.set_event(EVT_LE_META_EVENT);
+    filter.set_ptype(HCI_EVENT_PKT); // Only HCI event packets (0x04)
+    filter.set_event(EVT_LE_META_EVENT); // Only LE Meta Events (0x3E)
 
     let ret = unsafe {
         libc::setsockopt(
@@ -223,12 +237,25 @@ fn set_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
 
 /// Set up a BPF filter to match Ruuvi manufacturer ID at the kernel level.
 ///
-/// This filter reduces CPU usage by discarding non-Ruuvi packets in the kernel
-/// before they reach userspace. The filter checks:
+/// This is the second layer of kernel-level filtering, complementing HCI_FILTER.
+/// While HCI_FILTER drops non-LE-Meta-Event packets, this BPF filter provides
+/// finer-grained filtering to drop:
+/// - Non-advertising LE Meta Events (connection complete, etc.)
+/// - Advertisements from non-Ruuvi devices (Tile trackers, smartwatches, etc.)
+///
+/// The filter checks:
 /// 1. Packet type is HCI_EVENT_PKT (0x04)
 /// 2. Event code is EVT_LE_META_EVENT (0x3E)
 /// 3. Subevent is EVT_LE_ADVERTISING_REPORT (0x02)
 /// 4. Packet contains Ruuvi manufacturer ID (0x9904) at common positions
+///
+/// Combined filtering layers:
+/// ```text
+/// All HCI packets
+///   └─[HCI_FILTER]─► Only LE Meta Events
+///       └─[BPF filter]─► Only Ruuvi advertising reports
+///           └─[Application]─► Parse and decode
+/// ```
 fn set_bpf_ruuvi_filter(fd: &OwnedFd) -> Result<(), ScanError> {
     // Ruuvi manufacturer ID as big-endian 16-bit value for BPF comparison
     // BPF loads 16-bit values in network byte order (big-endian)
@@ -529,6 +556,15 @@ fn parse_advertising_report(data: &[u8], verbose: bool) -> Option<MeasurementRes
 /// This function opens a raw HCI socket, configures LE scanning, and
 /// processes advertising reports. Discovered measurements are sent through the
 /// returned channel. Runs indefinitely until interrupted.
+///
+/// # Kernel-Level Filtering
+///
+/// To minimize CPU usage, two layers of kernel-level filtering are applied:
+/// 1. **HCI_FILTER** - Drops all non-LE-Meta-Event packets (commands, ACL, etc.)
+/// 2. **BPF filter** - Drops non-Ruuvi advertisements (Tile, smartwatches, etc.)
+///
+/// This ensures the application only wakes up for actual RuuviTag broadcasts,
+/// not for the many other BLE devices that may be in the environment.
 ///
 /// # Arguments
 /// * `verbose` - If true, decode errors are sent as Err values; otherwise they're silently dropped.
