@@ -13,65 +13,40 @@ use crate::mac_address::MacAddress;
 use crate::measurement::Measurement;
 use ruuvi_decoders::{v5, v6};
 use std::time::SystemTime;
+use thiserror::Error;
 use tokio::sync::mpsc;
 
 /// Error types for decoding RuuviTag data.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Error, Debug, Clone, PartialEq)]
 pub enum DecodeError {
     /// Unsupported RuuviTag data format (e.g., V2, V3, V4 when only V5 is supported)
+    #[error("Unsupported format: {0}")]
     UnsupportedFormat(String),
     /// Invalid or corrupted data that cannot be decoded
+    #[error("Invalid data: {0}")]
     InvalidData(String),
     /// Decoder library returned an error
+    #[error("Decoder error: {0}")]
     DecoderError(String),
 }
-
-impl std::fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DecodeError::UnsupportedFormat(msg) => write!(f, "Unsupported format: {}", msg),
-            DecodeError::InvalidData(msg) => write!(f, "Invalid data: {}", msg),
-            DecodeError::DecoderError(msg) => write!(f, "Decoder error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for DecodeError {}
 
 /// Convenience alias for decoded measurements or decode errors.
 pub type MeasurementResult = Result<Measurement, DecodeError>;
 
 /// Error type for scanner operations.
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum ScanError {
     /// Bluetooth/adapter related error
+    #[error("Bluetooth error: {0}")]
     Bluetooth(String),
     /// Data decoding error
-    Decode(DecodeError),
+    #[error("Decode error: {0}")]
+    Decode(#[from] DecodeError),
     /// Backend not available (not compiled in)
     #[allow(dead_code)]
+    #[error("Backend '{0}' not available (not compiled in)")]
     BackendNotAvailable(String),
 }
-
-impl std::fmt::Display for ScanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ScanError::Bluetooth(e) => write!(f, "Bluetooth error: {}", e),
-            ScanError::Decode(e) => write!(f, "Decode error: {}", e),
-            ScanError::BackendNotAvailable(name) => {
-                write!(f, "Backend '{}' not available (not compiled in)", name)
-            }
-        }
-    }
-}
-
-impl From<DecodeError> for ScanError {
-    fn from(err: DecodeError) -> Self {
-        ScanError::Decode(err)
-    }
-}
-
-impl std::error::Error for ScanError {}
 
 /// Ruuvi Innovations manufacturer ID (little-endian bytes for pattern matching).
 ///
