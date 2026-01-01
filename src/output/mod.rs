@@ -12,13 +12,17 @@ use crate::measurement::Measurement;
 ///
 /// Implementations of this trait convert a `Measurement` into a formatted string
 /// suitable for a specific output format (e.g., InfluxDB line protocol, JSON, CSV).
+///
+/// The `name` parameter is the resolved device name (either an alias or the MAC address),
+/// determined by the caller. This keeps formatters simple and free of alias handling logic.
 pub trait OutputFormatter: Send + Sync {
     /// Format a measurement.
     ///
     /// # Arguments
     /// * `measurement` - The measurement data to format (includes timestamp)
+    /// * `name` - The resolved device name (alias or MAC address)
     ///
     /// # Returns
     /// A formatted string representation of the measurement
-    fn format(&self, measurement: &Measurement) -> String;
+    fn format(&self, measurement: &Measurement, name: &str) -> String;
 }
