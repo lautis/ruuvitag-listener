@@ -14,20 +14,6 @@ use std::str::FromStr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct MacAddress(pub [u8; 6]);
 
-impl MacAddress {
-    /// Create a new MAC address from a 6-byte array.
-    #[cfg(feature = "bluer")]
-    pub const fn new(bytes: [u8; 6]) -> Self {
-        Self(bytes)
-    }
-
-    /// Get the underlying bytes.
-    #[cfg(feature = "bluer")]
-    pub fn as_bytes(&self) -> &[u8; 6] {
-        &self.0
-    }
-}
-
 impl fmt::Display for MacAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
