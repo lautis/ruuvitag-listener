@@ -63,6 +63,18 @@ pub fn to_map(aliases: &[Alias]) -> AliasMap {
         .collect()
 }
 
+/// Resolve a device name from aliases, falling back to the MAC address string.
+///
+/// # Arguments
+/// * `mac` - The MAC address to resolve
+/// * `aliases` - The alias map to look up
+///
+/// # Returns
+/// The alias name if found, otherwise the MAC address formatted as a string.
+pub fn resolve_name(mac: &MacAddress, aliases: &AliasMap) -> String {
+    aliases.get(mac).cloned().unwrap_or_else(|| mac.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +127,20 @@ mod tests {
             map.get(&MacAddress([0x00, 0x00, 0x00, 0x00, 0x00, 0x00])),
             None
         );
+    }
+
+    #[test]
+    fn resolve_name_returns_alias_when_present() {
+        let mut aliases = HashMap::new();
+        aliases.insert(TEST_MAC, "Sauna".to_string());
+
+        assert_eq!(resolve_name(&TEST_MAC, &aliases), "Sauna");
+    }
+
+    #[test]
+    fn resolve_name_returns_mac_when_no_alias() {
+        let aliases = HashMap::new();
+
+        assert_eq!(resolve_name(&TEST_MAC, &aliases), "AA:BB:CC:DD:EE:FF");
     }
 }

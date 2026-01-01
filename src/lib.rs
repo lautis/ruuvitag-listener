@@ -16,7 +16,7 @@ pub mod throttle;
 pub(crate) mod test_utils;
 
 // Re-export commonly used types at the crate root
-pub use alias::{Alias, AliasMap, parse_alias, to_map};
+pub use alias::{Alias, AliasMap, parse_alias, resolve_name, to_map};
 pub use mac_address::MacAddress;
 pub use measurement::Measurement;
 pub use output::OutputFormatter;

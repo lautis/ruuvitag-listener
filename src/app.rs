@@ -85,9 +85,10 @@ impl Scanner for RealScanner {
 fn write_measurement(
     formatter: &dyn OutputFormatter,
     measurement: &Measurement,
+    name: &str,
     out: &mut dyn Write,
 ) -> io::Result<()> {
-    let line = formatter.format(measurement);
+    let line = formatter.format(measurement, name);
     writeln!(out, "{line}")
 }
 
@@ -102,7 +103,7 @@ pub async fn run_with_io(
     err: &mut dyn Write,
 ) -> Result<(), RunError> {
     let aliases: AliasMap = crate::alias::to_map(&options.aliases);
-    let formatter = InfluxDbFormatter::new(options.influxdb_measurement, aliases);
+    let formatter = InfluxDbFormatter::new(options.influxdb_measurement);
 
     // Create throttle if interval is specified
     let mut throttle = options.throttle.map(Throttle::new);
@@ -117,7 +118,8 @@ pub async fn run_with_io(
                     .is_none_or(|t: &mut Throttle| t.should_emit(measurement.mac));
 
                 if should_emit {
-                    write_measurement(&formatter, &measurement, out)?;
+                    let name = crate::alias::resolve_name(&measurement.mac, &aliases);
+                    write_measurement(&formatter, &measurement, &name, out)?;
                 }
             }
             Err(decode_err) => {

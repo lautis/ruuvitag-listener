@@ -1,6 +1,5 @@
 //! InfluxDB line protocol output formatter.
 
-use crate::alias::AliasMap;
 use crate::measurement::Measurement;
 use crate::output::OutputFormatter;
 use std::fmt::Write;
@@ -12,15 +11,10 @@ use std::time::Duration;
 /// InfluxDB line protocol formatter.
 ///
 /// Formats measurements according to the InfluxDB line protocol specification.
-/// Supports configurable measurement name and MAC address aliases.
-///
-/// Uses efficient `Address` keys for alias lookup (O(1) HashMap vs O(log n) BTreeMap),
-/// and only formats addresses to strings during output generation.
+/// The device name (alias or MAC) is provided by the caller via the `format` method.
 pub struct InfluxDbFormatter {
     /// The measurement name in InfluxDB
     measurement_name: String,
-    /// Aliases for MAC addresses (Address -> human-readable name)
-    aliases: AliasMap,
 }
 
 impl InfluxDbFormatter {
@@ -34,12 +28,8 @@ impl InfluxDbFormatter {
     ///
     /// # Arguments
     /// * `measurement_name` - The measurement name to use in the line protocol
-    /// * `aliases` - A map from MAC addresses to human-readable names
-    pub fn new(measurement_name: String, aliases: AliasMap) -> Self {
-        Self {
-            measurement_name,
-            aliases,
-        }
+    pub fn new(measurement_name: String) -> Self {
+        Self { measurement_name }
     }
 
     /// Write tags directly to the buffer (no intermediate BTreeMap).
@@ -50,24 +40,19 @@ impl InfluxDbFormatter {
     /// Note: `write!` to a `String` is infallible (only fails on OOM which panics anyway),
     /// so we use `let _ = ...` to explicitly ignore the Result.
     #[inline]
-    fn write_tags(&self, buf: &mut String, m: &Measurement) {
+    fn write_tags(buf: &mut String, m: &Measurement, name: &str) {
         // Write mac tag
         let _ = write!(buf, ",mac={}", m.mac);
 
-        // Write name tag (alias or MAC address)
-        buf.push_str(",name=");
-        if let Some(alias) = self.aliases.get(&m.mac) {
-            buf.push_str(alias);
-        } else {
-            let _ = write!(buf, "{}", m.mac);
-        }
+        // Write name tag (resolved by caller)
+        let _ = write!(buf, ",name={}", name);
     }
 
     /// Write fields directly to the buffer (no intermediate BTreeMap).
     ///
     /// Only writes fields that have values. Uses a macro to avoid code duplication.
     #[inline]
-    fn write_fields(&self, buf: &mut String, m: &Measurement) {
+    fn write_fields(buf: &mut String, m: &Measurement) {
         let mut first = true;
 
         // Macro to write a field if present, handling the comma separator.
@@ -135,7 +120,7 @@ impl OutputFormatter for InfluxDbFormatter {
     ///
     /// This implementation writes directly to a pre-sized buffer, avoiding
     /// intermediate allocations from BTreeMap and String clones.
-    fn format(&self, m: &Measurement) -> String {
+    fn format(&self, m: &Measurement, name: &str) -> String {
         // Pre-allocate buffer: measurement name + tags (~50 bytes) + fields (~200 bytes max)
         // + timestamp (~20 bytes) = ~270 bytes typical, 300 with headroom
         let mut buf = String::with_capacity(300);
@@ -144,13 +129,13 @@ impl OutputFormatter for InfluxDbFormatter {
         buf.push_str(&self.measurement_name);
 
         // Write tags directly
-        self.write_tags(&mut buf, m);
+        Self::write_tags(&mut buf, m, name);
 
         // Space separator between tags and fields
         buf.push(' ');
 
         // Write fields directly
-        self.write_fields(&mut buf, m);
+        Self::write_fields(&mut buf, m);
 
         // Write timestamp
         Self::write_timestamp(&mut buf, m.timestamp);
@@ -163,7 +148,6 @@ impl OutputFormatter for InfluxDbFormatter {
 mod tests {
     use super::*;
     use crate::test_utils::{TEST_MAC, base_measurement};
-    use std::collections::HashMap;
 
     fn assert_contains_all(haystack: &str, needles: &[&str]) {
         for needle in needles {
@@ -176,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_influxdb_formatter_basic() {
-        let formatter = InfluxDbFormatter::new("ruuvi".to_string(), HashMap::new());
+        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
         let mut measurement = base_measurement(TEST_MAC, timestamp);
         measurement.temperature = Some(25.5);
@@ -193,7 +177,7 @@ mod tests {
         measurement.nox_index = Some(45.0);
         measurement.luminosity = Some(10.0);
 
-        let result = formatter.format(&measurement);
+        let result = formatter.format(&measurement, "AA:BB:CC:DD:EE:FF");
 
         // Check that the result contains expected parts
         assert!(result.starts_with("ruuvi,"));
@@ -201,6 +185,7 @@ mod tests {
             &result,
             &[
                 "mac=AA:BB:CC:DD:EE:FF",
+                "name=AA:BB:CC:DD:EE:FF",
                 "temperature=25.5",
                 "humidity=60",      // 60%
                 "pressure=101.325", // Pa -> kPa
@@ -223,27 +208,25 @@ mod tests {
 
     #[test]
     fn test_influxdb_formatter_with_alias() {
-        let mut aliases = HashMap::new();
-        aliases.insert(TEST_MAC, "Sauna".to_string());
-
-        let formatter = InfluxDbFormatter::new("ruuvi".to_string(), aliases);
+        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
         let mut measurement = base_measurement(TEST_MAC, timestamp);
         measurement.temperature = Some(80.0);
 
-        let result = formatter.format(&measurement);
+        // Name is now passed by caller (alias resolved at app layer)
+        let result = formatter.format(&measurement, "Sauna");
 
         assert_contains_all(&result, &["name=Sauna", "mac=AA:BB:CC:DD:EE:FF"]);
     }
 
     #[test]
     fn test_influxdb_formatter_partial_data() {
-        let formatter = InfluxDbFormatter::new("ruuvi".to_string(), HashMap::new());
+        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
         let mut measurement = base_measurement(TEST_MAC, timestamp);
         measurement.temperature = Some(25.5);
 
-        let result = formatter.format(&measurement);
+        let result = formatter.format(&measurement, "AA:BB:CC:DD:EE:FF");
 
         assert!(result.contains("temperature=25.5"));
         assert!(!result.contains("humidity="));

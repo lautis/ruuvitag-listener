@@ -4,7 +4,9 @@
 //! precise measurement and optimization of the formatting logic.
 
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
-use ruuvitag_listener::{InfluxDbFormatter, MacAddress, Measurement, OutputFormatter};
+use ruuvitag_listener::{
+    AliasMap, InfluxDbFormatter, MacAddress, Measurement, OutputFormatter, resolve_name,
+};
 use std::collections::HashMap;
 use std::time::SystemTime;
 
@@ -51,17 +53,19 @@ fn v6_measurement() -> Measurement {
         luminosity: Some(25.5),
     }
 }
+
 /// Benchmark formatter with different measurement types
 fn bench_format_measurement_types(c: &mut Criterion) {
     let mut group = c.benchmark_group("format_measurement_type");
-    let formatter = InfluxDbFormatter::new("ruuvi_measurement".to_string(), HashMap::new());
+    let formatter = InfluxDbFormatter::new("ruuvi_measurement".to_string());
+    let name = TEST_MAC.to_string();
 
     group.throughput(Throughput::Elements(1));
 
     let v5 = v5_measurement();
     group.bench_function("v5", |b| {
         b.iter(|| {
-            let output = formatter.format(black_box(&v5));
+            let output = formatter.format(black_box(&v5), black_box(&name));
             black_box(output)
         })
     });
@@ -69,7 +73,7 @@ fn bench_format_measurement_types(c: &mut Criterion) {
     let v6 = v6_measurement();
     group.bench_function("v6", |b| {
         b.iter(|| {
-            let output = formatter.format(black_box(&v6));
+            let output = formatter.format(black_box(&v6), black_box(&name));
             black_box(output)
         })
     });
@@ -77,46 +81,50 @@ fn bench_format_measurement_types(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark with and without aliases
-fn bench_format_alias_lookup(c: &mut Criterion) {
-    let mut group = c.benchmark_group("format_alias_lookup");
-    let measurement = v5_measurement();
+/// Benchmark alias resolution (now separate from formatting)
+fn bench_alias_resolution(c: &mut Criterion) {
+    let mut group = c.benchmark_group("alias_resolution");
 
     group.throughput(Throughput::Elements(1));
 
-    // No aliases
-    let formatter_no_alias =
-        InfluxDbFormatter::new("ruuvi_measurement".to_string(), HashMap::new());
+    // No aliases - falls back to MAC string
+    let empty_aliases: AliasMap = HashMap::new();
     group.bench_function("no_alias", |b| {
         b.iter(|| {
-            let output = formatter_no_alias.format(black_box(&measurement));
-            black_box(output)
+            let name = resolve_name(black_box(&TEST_MAC), black_box(&empty_aliases));
+            black_box(name)
         })
     });
 
     // With alias for this MAC
-    let mut aliases = HashMap::new();
+    let mut aliases: AliasMap = HashMap::new();
     aliases.insert(TEST_MAC, "Living_Room".to_string());
-    let formatter_with_alias = InfluxDbFormatter::new("ruuvi_measurement".to_string(), aliases);
     group.bench_function("with_alias", |b| {
         b.iter(|| {
-            let output = formatter_with_alias.format(black_box(&measurement));
-            black_box(output)
+            let name = resolve_name(black_box(&TEST_MAC), black_box(&aliases));
+            black_box(name)
         })
     });
 
     // With many aliases (but not for this MAC - tests lookup miss)
-    let mut many_aliases = HashMap::new();
+    let mut many_aliases: AliasMap = HashMap::new();
     for i in 0..100u8 {
         let mac = MacAddress([0x00, 0x00, 0x00, 0x00, 0x00, i]);
         many_aliases.insert(mac, format!("Device_{}", i));
     }
+    group.bench_function("miss_in_100", |b| {
+        b.iter(|| {
+            let name = resolve_name(black_box(&TEST_MAC), black_box(&many_aliases));
+            black_box(name)
+        })
+    });
+
     group.finish();
 }
 
 criterion_group!(
     benches,
     bench_format_measurement_types,
-    bench_format_alias_lookup
+    bench_alias_resolution
 );
 criterion_main!(benches);
