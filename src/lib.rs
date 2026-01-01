@@ -12,6 +12,9 @@ pub mod output;
 pub mod scanner;
 pub mod throttle;
 
+#[cfg(test)]
+pub(crate) mod test_utils;
+
 // Re-export commonly used types at the crate root
 pub use alias::{Alias, AliasMap, parse_alias, to_map};
 pub use mac_address::MacAddress;

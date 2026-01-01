@@ -186,10 +186,17 @@ impl OutputFormatter for InfluxDbFormatter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mac_address::MacAddress;
+    use crate::test_utils::{TEST_MAC, base_measurement};
     use std::collections::HashMap;
 
-    const TEST_MAC: MacAddress = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+    fn assert_contains_all(haystack: &str, needles: &[&str]) {
+        for needle in needles {
+            assert!(
+                haystack.contains(needle),
+                "expected output to contain {needle:?}\noutput: {haystack}"
+            );
+        }
+    }
 
     #[test]
     fn test_field_value_display() {
@@ -249,44 +256,46 @@ mod tests {
     fn test_influxdb_formatter_basic() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string(), HashMap::new());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
-        let measurement = Measurement {
-            mac: TEST_MAC,
-            timestamp,
-            temperature: Some(25.5),
-            humidity: Some(60.0),
-            pressure: Some(101325.0),
-            battery: Some(3.0),
-            tx_power: Some(4),
-            movement_counter: Some(10),
-            measurement_sequence: Some(100),
-            acceleration: Some((0.01, -0.02, 1.0)),
-            pm2_5: Some(12.5),
-            co2: Some(420.0),
-            voc_index: Some(123.0),
-            nox_index: Some(45.0),
-            luminosity: Some(10.0),
-        };
+        let mut measurement = base_measurement(TEST_MAC, timestamp);
+        measurement.temperature = Some(25.5);
+        measurement.humidity = Some(60.0);
+        measurement.pressure = Some(101325.0);
+        measurement.battery = Some(3.0);
+        measurement.tx_power = Some(4);
+        measurement.movement_counter = Some(10);
+        measurement.measurement_sequence = Some(100);
+        measurement.acceleration = Some((0.01, -0.02, 1.0));
+        measurement.pm2_5 = Some(12.5);
+        measurement.co2 = Some(420.0);
+        measurement.voc_index = Some(123.0);
+        measurement.nox_index = Some(45.0);
+        measurement.luminosity = Some(10.0);
 
         let result = formatter.format(&measurement);
 
         // Check that the result contains expected parts
         assert!(result.starts_with("ruuvi,"));
-        assert!(result.contains("mac=AA:BB:CC:DD:EE:FF"));
-        assert!(result.contains("temperature=25.5"));
-        assert!(result.contains("humidity=60")); // 60%
-        assert!(result.contains("pressure=101.325")); // Pa -> kPa
-        assert!(result.contains("battery_potential=3"));
-        assert!(result.contains("tx_power=4"));
-        assert!(result.contains("movement_counter=10"));
-        assert!(result.contains("measurement_sequence_number=100"));
-        assert!(result.contains("acceleration_x=0.01"));
-        assert!(result.contains("acceleration_y=-0.02"));
-        assert!(result.contains("acceleration_z=1"));
-        assert!(result.contains("pm2_5=12.5"));
-        assert!(result.contains("co2=420"));
-        assert!(result.contains("voc_index=123"));
-        assert!(result.contains("nox_index=45"));
-        assert!(result.contains("luminosity=10"));
+        assert_contains_all(
+            &result,
+            &[
+                "mac=AA:BB:CC:DD:EE:FF",
+                "temperature=25.5",
+                "humidity=60",      // 60%
+                "pressure=101.325", // Pa -> kPa
+                "battery_potential=3",
+                "tx_power=4",
+                "movement_counter=10",
+                "measurement_sequence_number=100",
+                "acceleration_x=0.01",
+                "acceleration_y=-0.02",
+                "acceleration_z=1",
+                "pm2_5=12.5",
+                "co2=420",
+                "voc_index=123",
+                "nox_index=45",
+                "luminosity=10",
+            ],
+        );
         assert!(result.ends_with("1000000000000000000"));
     }
 
@@ -297,51 +306,20 @@ mod tests {
 
         let formatter = InfluxDbFormatter::new("ruuvi".to_string(), aliases);
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
-        let measurement = Measurement {
-            mac: TEST_MAC,
-            timestamp,
-            temperature: Some(80.0),
-            humidity: None,
-            pressure: None,
-            battery: None,
-            tx_power: None,
-            movement_counter: None,
-            measurement_sequence: None,
-            acceleration: None,
-            pm2_5: None,
-            co2: None,
-            voc_index: None,
-            nox_index: None,
-            luminosity: None,
-        };
+        let mut measurement = base_measurement(TEST_MAC, timestamp);
+        measurement.temperature = Some(80.0);
 
         let result = formatter.format(&measurement);
 
-        assert!(result.contains("name=Sauna"));
-        assert!(result.contains("mac=AA:BB:CC:DD:EE:FF"));
+        assert_contains_all(&result, &["name=Sauna", "mac=AA:BB:CC:DD:EE:FF"]);
     }
 
     #[test]
     fn test_influxdb_formatter_partial_data() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string(), HashMap::new());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
-        let measurement = Measurement {
-            mac: TEST_MAC,
-            timestamp,
-            temperature: Some(25.5),
-            humidity: None,
-            pressure: None,
-            battery: None,
-            tx_power: None,
-            movement_counter: None,
-            measurement_sequence: None,
-            acceleration: None,
-            pm2_5: None,
-            co2: None,
-            voc_index: None,
-            nox_index: None,
-            luminosity: None,
-        };
+        let mut measurement = base_measurement(TEST_MAC, timestamp);
+        measurement.temperature = Some(25.5);
 
         let result = formatter.format(&measurement);
 

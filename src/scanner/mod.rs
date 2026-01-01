@@ -239,15 +239,13 @@ pub async fn start_scan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::TEST_MAC;
     use std::str::FromStr;
 
-    const TEST_MAC: MacAddress = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-
-    #[test]
-    fn test_decode_ruuvi_data_v5() {
+    fn v5_payload() -> Vec<u8> {
         // Example V5 data (without manufacturer ID prefix)
         // This is a valid V5 payload
-        let data: Vec<u8> = vec![
+        vec![
             0x05, // Format 5
             0x12, 0xFC, // Temperature: 24.30°C (0x12FC = 4860, 4860 * 0.005 = 24.30)
             0x53, 0x94, // Humidity: 53.49% (0x5394 = 21396, 21396 * 0.0025 = 53.49)
@@ -259,12 +257,20 @@ mod tests {
             0x42, // Movement counter: 66
             0x00, 0xCD, // Sequence: 205
             0xCB, 0xB8, 0x33, 0x4C, 0x88, 0x4F, // MAC address (ignored in decode)
-        ];
+        ]
+    }
 
-        let result = decode_ruuvi_data(TEST_MAC, &data);
-        assert!(result.is_ok());
+    fn v6_payload() -> Vec<u8> {
+        // Example V6 payload (includes format byte and compact MAC)
+        vec![
+            0x06, 0x17, 0x0C, 0x56, 0x68, 0xC7, 0x9E, 0x00, 0x70, 0x00, 0xC9, 0x05, 0x01, 0xD9,
+            0xFF, 0xCD, 0x00, 0x4C, 0x88, 0x4F,
+        ]
+    }
 
-        let measurement = result.unwrap();
+    #[test]
+    fn test_decode_ruuvi_data_v5() {
+        let measurement = decode_ruuvi_data(TEST_MAC, &v5_payload()).unwrap();
         assert_eq!(measurement.mac, TEST_MAC);
         assert!(measurement.timestamp.elapsed().is_ok()); // Verify timestamp is set
         assert!(measurement.temperature.is_some());
@@ -288,22 +294,12 @@ mod tests {
     #[test]
     fn test_decode_ruuvi_data_invalid() {
         let data: Vec<u8> = vec![0x00, 0x01, 0x02]; // Invalid/too short data
-        let result = decode_ruuvi_data(TEST_MAC, &data);
-        assert!(result.is_err());
+        assert!(decode_ruuvi_data(TEST_MAC, &data).is_err());
     }
 
     #[test]
     fn test_decode_ruuvi_data_v6() {
-        // Example V6 payload (includes format byte and compact MAC)
-        let data: Vec<u8> = vec![
-            0x06, 0x17, 0x0C, 0x56, 0x68, 0xC7, 0x9E, 0x00, 0x70, 0x00, 0xC9, 0x05, 0x01, 0xD9,
-            0xFF, 0xCD, 0x00, 0x4C, 0x88, 0x4F,
-        ];
-
-        let result = decode_ruuvi_data(TEST_MAC, &data);
-        assert!(result.is_ok());
-
-        let measurement = result.unwrap();
+        let measurement = decode_ruuvi_data(TEST_MAC, &v6_payload()).unwrap();
         assert_eq!(measurement.mac, TEST_MAC);
         assert!(measurement.temperature.is_some());
         assert!(measurement.humidity.is_some());
