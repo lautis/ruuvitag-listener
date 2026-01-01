@@ -15,6 +15,8 @@ use std::time::Duration;
 pub struct InfluxDbFormatter {
     /// The measurement name in InfluxDB
     measurement_name: String,
+    /// Whether the measurement name needs escaping (precomputed at initialization)
+    needs_measurement_escape: bool,
 }
 
 impl InfluxDbFormatter {
@@ -29,7 +31,75 @@ impl InfluxDbFormatter {
     /// # Arguments
     /// * `measurement_name` - The measurement name to use in the line protocol
     pub fn new(measurement_name: String) -> Self {
-        Self { measurement_name }
+        let needs_escape = Self::needs_measurement_escape(&measurement_name);
+        Self {
+            measurement_name,
+            needs_measurement_escape: needs_escape,
+        }
+    }
+
+    /// Check if a measurement name needs escaping (fast path).
+    ///
+    /// Returns true if the string contains commas or spaces.
+    #[inline]
+    fn needs_measurement_escape(s: &str) -> bool {
+        s.bytes().any(|b| b == b',' || b == b' ')
+    }
+
+    /// Check if a tag value needs escaping (fast path).
+    ///
+    /// Returns true if the string contains commas, equals signs, or spaces.
+    #[inline]
+    fn needs_tag_escape(s: &str) -> bool {
+        s.bytes().any(|b| b == b',' || b == b'=' || b == b' ')
+    }
+
+    /// Write measurement name to buffer, escaping if needed.
+    ///
+    /// Escapes commas and spaces with backslashes.
+    /// Measurement names must escape: `,` → `\,`, ` ` → `\ `
+    ///
+    /// # Arguments
+    /// * `buf` - The buffer to write to
+    /// * `s` - The measurement name string
+    /// * `needs_escape` - Whether escaping is needed (precomputed)
+    #[inline]
+    fn write_measurement_name(buf: &mut String, s: &str, needs_escape: bool) {
+        if needs_escape {
+            // Slow path: escape special characters
+            for ch in s.chars() {
+                match ch {
+                    ',' => buf.push_str("\\,"),
+                    ' ' => buf.push_str("\\ "),
+                    _ => buf.push(ch),
+                }
+            }
+        } else {
+            // Fast path: no escaping needed, write directly
+            buf.push_str(s);
+        }
+    }
+
+    /// Write tag value to buffer, escaping if needed.
+    ///
+    /// Escapes commas, equals signs, and spaces with backslashes.
+    /// Tag values must escape: `,` → `\,`, `=` → `\=`, ` ` → `\ `
+    #[inline]
+    fn write_tag_value(buf: &mut String, s: &str) {
+        if Self::needs_tag_escape(s) {
+            // Slow path: escape special characters
+            for ch in s.chars() {
+                match ch {
+                    ',' => buf.push_str("\\,"),
+                    '=' => buf.push_str("\\="),
+                    ' ' => buf.push_str("\\ "),
+                    _ => buf.push(ch),
+                }
+            }
+        } else {
+            // Fast path: no escaping needed, write directly
+            buf.push_str(s);
+        }
     }
 
     /// Write tags directly to the buffer (no intermediate BTreeMap).
@@ -37,15 +107,18 @@ impl InfluxDbFormatter {
     /// Tags are written in a fixed order: mac, name.
     /// InfluxDB accepts tags in any order, so we don't need to sort.
     ///
+    /// Tag values are escaped according to InfluxDB line protocol rules.
+    ///
     /// Note: `write!` to a `String` is infallible (only fails on OOM which panics anyway),
     /// so we use `let _ = ...` to explicitly ignore the Result.
     #[inline]
     fn write_tags(buf: &mut String, m: &Measurement, name: &str) {
-        // Write mac tag
+        // Write mac tag (MAC addresses are safe - format is AA:BB:CC:DD:EE:FF)
         let _ = write!(buf, ",mac={}", m.mac);
 
-        // Write name tag (resolved by caller)
-        let _ = write!(buf, ",name={}", name);
+        // Write name tag (resolved by caller) - escape special characters if needed
+        buf.push_str(",name=");
+        Self::write_tag_value(buf, name);
     }
 
     /// Write fields directly to the buffer (no intermediate BTreeMap).
@@ -125,8 +198,13 @@ impl OutputFormatter for InfluxDbFormatter {
         // + timestamp (~20 bytes) = ~270 bytes typical, 300 with headroom
         let mut buf = String::with_capacity(300);
 
-        // Write measurement name (borrowed, no clone)
-        buf.push_str(&self.measurement_name);
+        // Write measurement name (escaped according to InfluxDB rules if needed)
+        // Use precomputed escape flag to avoid checking on every format call
+        Self::write_measurement_name(
+            &mut buf,
+            &self.measurement_name,
+            self.needs_measurement_escape,
+        );
 
         // Write tags directly
         Self::write_tags(&mut buf, m, name);
@@ -231,5 +309,117 @@ mod tests {
         assert!(result.contains("temperature=25.5"));
         assert!(!result.contains("humidity="));
         assert!(!result.contains("pressure="));
+    }
+
+    #[test]
+    fn test_measurement_name_with_space() {
+        let formatter = InfluxDbFormatter::new("ruuvi tag".to_string());
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
+        let measurement = base_measurement(TEST_MAC, timestamp);
+
+        let result = formatter.format(&measurement, "Device");
+
+        // InfluxDB requires spaces in measurement names to be escaped as \
+        assert!(result.starts_with("ruuvi\\ tag"));
+    }
+
+    #[test]
+    fn test_measurement_name_with_comma() {
+        let formatter = InfluxDbFormatter::new("ruuvi,tag".to_string());
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
+        let measurement = base_measurement(TEST_MAC, timestamp);
+
+        let result = formatter.format(&measurement, "Device");
+
+        // InfluxDB requires commas in measurement names to be escaped as \,
+        assert!(result.starts_with("ruuvi\\,tag"));
+    }
+
+    #[test]
+    fn test_device_name_with_space() {
+        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
+        let measurement = base_measurement(TEST_MAC, timestamp);
+
+        let result = formatter.format(&measurement, "Living Room");
+
+        // InfluxDB requires spaces in tag values to be escaped as \
+        assert!(result.contains("name=Living\\ Room"));
+    }
+
+    #[test]
+    fn test_device_name_with_comma() {
+        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
+        let measurement = base_measurement(TEST_MAC, timestamp);
+
+        let result = formatter.format(&measurement, "Kitchen, Upstairs");
+
+        // InfluxDB requires commas and spaces in tag values to be escaped
+        // "Kitchen, Upstairs" becomes "Kitchen\\,\\ Upstairs"
+        assert!(result.contains("name=Kitchen\\,\\ Upstairs"));
+    }
+
+    #[test]
+    fn test_device_name_with_equals() {
+        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
+        let measurement = base_measurement(TEST_MAC, timestamp);
+
+        let result = formatter.format(&measurement, "tag=value");
+
+        // InfluxDB requires equals signs in tag values to be escaped as \=
+        assert!(result.contains("name=tag\\=value"));
+    }
+
+    #[test]
+    fn test_empty_measurement_name() {
+        let formatter = InfluxDbFormatter::new("".to_string());
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
+        let measurement = base_measurement(TEST_MAC, timestamp);
+
+        let result = formatter.format(&measurement, "Device");
+
+        // Empty measurement name should still produce valid line protocol
+        // (starts with comma from tags)
+        assert!(result.starts_with(","));
+    }
+
+    #[test]
+    fn test_empty_device_name() {
+        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
+        let measurement = base_measurement(TEST_MAC, timestamp);
+
+        let result = formatter.format(&measurement, "");
+
+        // Empty device name should still produce valid line protocol
+        assert!(result.contains("name="));
+    }
+
+    #[test]
+    fn test_device_name_with_multiple_special_chars() {
+        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
+        let measurement = base_measurement(TEST_MAC, timestamp);
+
+        let result = formatter.format(&measurement, "Room 1, Floor=2");
+
+        // Should escape all special characters: space, comma, equals
+        // "Room 1, Floor=2" becomes "Room\\ 1\\,\\ Floor\\=2"
+        assert!(result.contains("name=Room\\ 1\\,\\ Floor\\=2"));
+    }
+
+    #[test]
+    fn test_measurement_name_with_multiple_special_chars() {
+        let formatter = InfluxDbFormatter::new("ruuvi tag, v2".to_string());
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
+        let measurement = base_measurement(TEST_MAC, timestamp);
+
+        let result = formatter.format(&measurement, "Device");
+
+        // Should escape spaces and commas in measurement name
+        // "ruuvi tag, v2" becomes "ruuvi\\ tag\\,\\ v2" (space after comma is also escaped)
+        assert!(result.starts_with("ruuvi\\ tag\\,\\ v2"));
     }
 }
