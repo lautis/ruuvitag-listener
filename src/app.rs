@@ -18,74 +18,6 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-/// Returns the default backend argument as a string for CLI.
-const fn default_backend_str() -> &'static str {
-    #[cfg(feature = "bluer")]
-    {
-        "bluer"
-    }
-    #[cfg(all(feature = "hci", not(feature = "bluer")))]
-    {
-        "hci"
-    }
-    #[cfg(not(any(feature = "bluer", feature = "hci")))]
-    {
-        compile_error!("At least one backend feature must be enabled");
-    }
-}
-
-/// Returns a help string listing available backends.
-const fn backend_help() -> &'static str {
-    #[cfg(all(feature = "bluer", feature = "hci"))]
-    {
-        "Bluetooth scanner backend [available: bluer, hci]"
-    }
-    #[cfg(all(feature = "bluer", not(feature = "hci")))]
-    {
-        "Bluetooth scanner backend [available: bluer]"
-    }
-    #[cfg(all(feature = "hci", not(feature = "bluer")))]
-    {
-        "Bluetooth scanner backend [available: hci]"
-    }
-    #[cfg(not(any(feature = "bluer", feature = "hci")))]
-    {
-        compile_error!("At least one backend feature must be enabled");
-    }
-}
-
-fn parse_backend(src: &str) -> Result<Backend, String> {
-    let backend: Backend = src.parse().map_err(|e: String| e)?;
-    match backend {
-        Backend::Bluer => {
-            #[cfg(feature = "bluer")]
-            {
-                Ok(Backend::Bluer)
-            }
-            #[cfg(not(feature = "bluer"))]
-            {
-                Err(
-                    "Backend 'bluer' is not available (crate compiled without feature 'bluer')"
-                        .to_string(),
-                )
-            }
-        }
-        Backend::Hci => {
-            #[cfg(feature = "hci")]
-            {
-                Ok(Backend::Hci)
-            }
-            #[cfg(not(feature = "hci"))]
-            {
-                Err(
-                    "Backend 'hci' is not available (crate compiled without feature 'hci')"
-                        .to_string(),
-                )
-            }
-        }
-    }
-}
-
 /// Configuration for the core run loop.
 #[derive(Parser, Debug, Clone)]
 #[command(author, about, version)]
@@ -110,7 +42,7 @@ pub struct Options {
     pub throttle: Option<Duration>,
 
     /// Bluetooth scanner backend to use
-    #[arg(long, value_parser = parse_backend, default_value = default_backend_str(), help = backend_help())]
+    #[arg(long, default_value_t, value_enum)]
     pub backend: Backend,
 }
 
