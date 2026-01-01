@@ -186,10 +186,10 @@ impl OutputFormatter for InfluxDbFormatter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bluer::Address;
+    use crate::mac_address::MacAddress;
     use std::collections::HashMap;
 
-    const TEST_MAC: Address = Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+    const TEST_MAC: MacAddress = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 
     #[test]
     fn test_field_value_display() {
