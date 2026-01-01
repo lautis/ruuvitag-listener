@@ -46,6 +46,12 @@ const FILTER_POLICY_ACCEPT_ALL: u8 = 0x00;
 // AD types
 const AD_TYPE_MANUFACTURER_DATA: u8 = 0xFF;
 
+// Ruuvi manufacturer ID as little-endian bytes for quick matching
+const RUUVI_MANUFACTURER_ID_LE: [u8; 2] = [
+    (RUUVI_MANUFACTURER_ID & 0xFF) as u8,
+    (RUUVI_MANUFACTURER_ID >> 8) as u8,
+];
+
 /// HCI socket address structure
 #[repr(C)]
 struct SockaddrHci {
@@ -247,6 +253,15 @@ fn configure_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
     Ok(())
 }
 
+/// Quick check if a packet might contain Ruuvi manufacturer data.
+///
+/// This performs a fast scan for the Ruuvi manufacturer ID bytes (0x99 0x04 in LE)
+/// to avoid expensive parsing of non-Ruuvi advertisements.
+#[inline]
+fn might_be_ruuvi(data: &[u8]) -> bool {
+    data.windows(2).any(|w| w == RUUVI_MANUFACTURER_ID_LE)
+}
+
 /// Parse LE advertising report and extract RuuviTag data
 fn parse_advertising_report(data: &[u8], verbose: bool) -> Option<MeasurementResult> {
     // Minimum size for an advertising report
@@ -391,10 +406,12 @@ pub async fn start_scan(verbose: bool) -> Result<mpsc::Receiver<MeasurementResul
                     Err(_) => break,     // WouldBlock - no more data
                 };
 
-                // Check if this is an LE advertising report
+                // Check if this is an LE advertising report that might be from a RuuviTag
                 if n >= 4 && buf[0] == HCI_EVENT_PKT && buf[1] == EVT_LE_META_EVENT {
                     let subevent = buf[3];
+                    // Quick check for Ruuvi manufacturer ID before expensive parsing
                     if subevent == EVT_LE_ADVERTISING_REPORT
+                        && might_be_ruuvi(&buf[..n])
                         && let Some(result) = parse_advertising_report(&buf[..n], verbose)
                     {
                         match &result {
@@ -438,5 +455,25 @@ mod tests {
 
         assert_eq!(packet[0], 0x01); // Command packet type
         assert_eq!(packet.len(), 6); // Header + 2 params
+    }
+
+    #[test]
+    fn test_might_be_ruuvi_positive() {
+        // Packet containing Ruuvi manufacturer ID (0x0499 in little-endian = 0x99 0x04)
+        let packet = [0x04, 0x3E, 0x1A, 0x02, 0x01, 0x00, 0x99, 0x04, 0x05, 0x12];
+        assert!(might_be_ruuvi(&packet));
+    }
+
+    #[test]
+    fn test_might_be_ruuvi_negative() {
+        // Packet without Ruuvi manufacturer ID
+        let packet = [0x04, 0x3E, 0x1A, 0x02, 0x01, 0x00, 0xAA, 0xBB, 0x05, 0x12];
+        assert!(!might_be_ruuvi(&packet));
+    }
+
+    #[test]
+    fn test_might_be_ruuvi_empty() {
+        assert!(!might_be_ruuvi(&[]));
+        assert!(!might_be_ruuvi(&[0x99])); // Only one byte, can't match 2-byte pattern
     }
 }
