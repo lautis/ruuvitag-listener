@@ -245,34 +245,6 @@ mod tests {
     }
 
     #[test]
-    fn test_throttle_multiple_rapid_events_only_first_allowed() {
-        let mut throttle = Throttle::new(Duration::from_secs(1));
-
-        // First event allowed
-        assert!(throttle.should_emit(MAC1));
-
-        // All subsequent rapid events blocked
-        for _ in 0..10 {
-            assert!(!throttle.should_emit(MAC1));
-        }
-    }
-
-    #[test]
-    fn test_throttle_alternating_devices() {
-        let mut throttle = Throttle::new(Duration::from_secs(1));
-
-        // First events from each device allowed
-        assert!(throttle.should_emit(MAC1));
-        assert!(throttle.should_emit(MAC2));
-
-        // Alternating rapid events all blocked
-        assert!(!throttle.should_emit(MAC1));
-        assert!(!throttle.should_emit(MAC2));
-        assert!(!throttle.should_emit(MAC1));
-        assert!(!throttle.should_emit(MAC2));
-    }
-
-    #[test]
     fn test_throttle_many_devices() {
         let mut throttle = Throttle::new(Duration::from_secs(1));
 

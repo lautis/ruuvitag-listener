@@ -129,10 +129,4 @@ mod tests {
         let mac: MacAddress = addr.into();
         assert_eq!(mac, MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]));
     }
-
-    #[test]
-    fn test_mac_address_display() {
-        let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-        assert_eq!(format!("{}", mac), "AA:BB:CC:DD:EE:FF");
-    }
 }

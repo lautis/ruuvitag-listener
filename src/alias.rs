@@ -66,56 +66,38 @@ pub fn to_map(aliases: &[Alias]) -> AliasMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::TEST_MAC;
 
     #[test]
-    fn test_parse_alias_valid() {
-        let result = parse_alias("AA:BB:CC:DD:EE:FF=Kitchen");
-        assert!(result.is_ok());
-        let alias = result.unwrap();
-        assert_eq!(
-            alias.address,
-            MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])
-        );
-        assert_eq!(alias.name, "Kitchen");
+    fn parse_alias_valid_cases() {
+        let cases = [
+            ("AA:BB:CC:DD:EE:FF=Kitchen", TEST_MAC, "Kitchen"),
+            ("AA:BB:CC:DD:EE:FF=Living Room", TEST_MAC, "Living Room"),
+            ("aa:bb:cc:dd:ee:ff=Kitchen", TEST_MAC, "Kitchen"),
+        ];
+
+        for (src, expected_mac, expected_name) in cases {
+            let alias = parse_alias(src).unwrap();
+            assert_eq!(alias.address, expected_mac);
+            assert_eq!(alias.name, expected_name);
+        }
     }
 
     #[test]
-    fn test_parse_alias_with_spaces() {
-        let result = parse_alias("AA:BB:CC:DD:EE:FF=Living Room");
-        assert!(result.is_ok());
-        let alias = result.unwrap();
-        assert_eq!(alias.name, "Living Room");
+    fn parse_alias_invalid_format() {
+        assert!(parse_alias("no-equals-sign").is_err());
     }
 
     #[test]
-    fn test_parse_alias_lowercase() {
-        let result = parse_alias("aa:bb:cc:dd:ee:ff=Kitchen");
-        assert!(result.is_ok());
-        let alias = result.unwrap();
-        // Should be parsed correctly (case-insensitive hex)
-        assert_eq!(
-            alias.address,
-            MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])
-        );
+    fn parse_alias_invalid_mac() {
+        assert!(parse_alias("invalid-mac=Kitchen").is_err());
     }
 
     #[test]
-    fn test_parse_alias_invalid_format() {
-        let result = parse_alias("no-equals-sign");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_alias_invalid_mac() {
-        let result = parse_alias("invalid-mac=Kitchen");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_to_map() {
+    fn to_map_builds_lookup() {
         let aliases = vec![
             Alias {
-                address: MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]),
+                address: TEST_MAC,
                 name: "Kitchen".to_string(),
             },
             Alias {
@@ -124,10 +106,7 @@ mod tests {
             },
         ];
         let map = to_map(&aliases);
-        assert_eq!(
-            map.get(&MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])),
-            Some(&"Kitchen".to_string())
-        );
+        assert_eq!(map.get(&TEST_MAC), Some(&"Kitchen".to_string()));
         assert_eq!(
             map.get(&MacAddress([0x11, 0x22, 0x33, 0x44, 0x55, 0x66])),
             Some(&"Bedroom".to_string())
