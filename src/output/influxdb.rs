@@ -3,78 +3,11 @@
 use crate::alias::AliasMap;
 use crate::measurement::Measurement;
 use crate::output::OutputFormatter;
-use std::collections::BTreeMap;
-use std::fmt;
-#[cfg(test)]
-use std::time::Duration;
+use std::fmt::Write;
 use std::time::SystemTime;
 
-/// Field values for InfluxDB line protocol
-#[derive(Debug, PartialEq)]
-pub enum FieldValue {
-    Float(f64),
-    #[allow(dead_code)] // Used in tests
-    String(String),
-}
-
-impl fmt::Display for FieldValue {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            FieldValue::Float(num) => write!(f, "{num}"),
-            FieldValue::String(s) => write!(f, "\"{s}\""),
-        }
-    }
-}
-
-/// Data point in InfluxDB line protocol
-#[derive(Debug)]
-pub struct DataPoint {
-    pub measurement: String,
-    pub tag_set: BTreeMap<String, String>,
-    pub field_set: BTreeMap<String, FieldValue>,
-    pub timestamp: Option<SystemTime>,
-}
-
-fn fmt_tags(data_point: &DataPoint, fmt: &mut fmt::Formatter) -> fmt::Result {
-    for (key, value) in data_point.tag_set.iter() {
-        write!(fmt, ",{}={}", key, value)?;
-    }
-    Ok(())
-}
-
-fn fmt_fields(data_point: &DataPoint, fmt: &mut fmt::Formatter) -> fmt::Result {
-    let mut first = true;
-    for (key, value) in data_point.field_set.iter() {
-        if first {
-            first = false;
-        } else {
-            write!(fmt, ",")?;
-        }
-        write!(fmt, "{}={}", key, value)?;
-    }
-    Ok(())
-}
-
-fn fmt_timestamp(data_point: &DataPoint, fmt: &mut fmt::Formatter) -> fmt::Result {
-    if let Some(time) = data_point.timestamp {
-        let nanos = time
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_nanos();
-        write!(fmt, " {}", nanos)?;
-    }
-    Ok(())
-}
-
-impl fmt::Display for DataPoint {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        write!(fmt, "{}", self.measurement)?;
-        fmt_tags(self, fmt)?;
-        write!(fmt, " ")?;
-        fmt_fields(self, fmt)?;
-        fmt_timestamp(self, fmt)
-    }
-}
+#[cfg(test)]
+use std::time::Duration;
 
 /// InfluxDB line protocol formatter.
 ///
@@ -109,77 +42,120 @@ impl InfluxDbFormatter {
         }
     }
 
-    /// Build the tag set for InfluxDB line protocol.
+    /// Write tags directly to the buffer (no intermediate BTreeMap).
     ///
-    /// Tags include the MAC address and a human-readable name (if an alias exists).
-    /// Address is formatted to string only here, at the output boundary.
-    fn tag_set(&self, measurement: &Measurement) -> BTreeMap<String, String> {
-        let mut tags = BTreeMap::new();
-        let address = measurement.mac;
-        let address_str = address.to_string();
+    /// Tags are written in a fixed order: mac, name.
+    /// InfluxDB accepts tags in any order, so we don't need to sort.
+    ///
+    /// Note: `write!` to a `String` is infallible (only fails on OOM which panics anyway),
+    /// so we use `let _ = ...` to explicitly ignore the Result.
+    #[inline]
+    fn write_tags(&self, buf: &mut String, m: &Measurement) {
+        // Write mac tag
+        let _ = write!(buf, ",mac={}", m.mac);
 
-        tags.insert("mac".to_string(), address_str.clone());
-
-        // Use alias if available, otherwise fall back to MAC address string
-        let name = self.aliases.get(&address).cloned().unwrap_or(address_str);
-        tags.insert("name".to_string(), name);
-
-        tags
+        // Write name tag (alias or MAC address)
+        buf.push_str(",name=");
+        if let Some(alias) = self.aliases.get(&m.mac) {
+            buf.push_str(alias);
+        } else {
+            let _ = write!(buf, "{}", m.mac);
+        }
     }
 
-    /// Build the field set for InfluxDB line protocol.
+    /// Write fields directly to the buffer (no intermediate BTreeMap).
     ///
-    /// Only includes fields that have values (None fields are omitted).
-    /// Performs unit conversions as needed (pressure to kPa).
-    fn field_set(&self, m: &Measurement) -> BTreeMap<String, FieldValue> {
-        let mut fields = BTreeMap::new();
+    /// Only writes fields that have values. Uses a macro to avoid code duplication.
+    #[inline]
+    fn write_fields(&self, buf: &mut String, m: &Measurement) {
+        let mut first = true;
 
-        macro_rules! add {
+        // Macro to write a field if present, handling the comma separator.
+        macro_rules! write_field {
             ($name:literal, $val:expr) => {
                 if let Some(v) = $val {
-                    fields.insert($name.into(), FieldValue::Float(v));
+                    if first {
+                        first = false;
+                    } else {
+                        buf.push(',');
+                    }
+                    let _ = write!(buf, "{}={}", $name, v);
                 }
             };
         }
 
-        add!("temperature", m.temperature);
-        add!("humidity", m.humidity);
-        add!("pressure", m.pressure.map(Self::pressure_kpa));
-        add!("battery_potential", m.battery);
-        add!("tx_power", m.tx_power.map(f64::from));
-        add!("movement_counter", m.movement_counter.map(f64::from));
-        add!(
+        write_field!("temperature", m.temperature);
+        write_field!("humidity", m.humidity);
+        write_field!("pressure", m.pressure.map(Self::pressure_kpa));
+        write_field!("battery_potential", m.battery);
+        write_field!("tx_power", m.tx_power.map(f64::from));
+        write_field!("movement_counter", m.movement_counter.map(f64::from));
+        write_field!(
             "measurement_sequence_number",
             m.measurement_sequence.map(f64::from)
         );
-        add!("pm2_5", m.pm2_5);
-        add!("co2", m.co2);
-        add!("voc_index", m.voc_index);
-        add!("nox_index", m.nox_index);
-        add!("luminosity", m.luminosity);
+        write_field!("pm2_5", m.pm2_5);
+        write_field!("co2", m.co2);
+        write_field!("voc_index", m.voc_index);
+        write_field!("nox_index", m.nox_index);
+        write_field!("luminosity", m.luminosity);
 
+        // Handle acceleration tuple specially
         if let Some((x, y, z)) = m.acceleration {
-            fields.insert("acceleration_x".into(), FieldValue::Float(x));
-            fields.insert("acceleration_y".into(), FieldValue::Float(y));
-            fields.insert("acceleration_z".into(), FieldValue::Float(z));
+            if first {
+                first = false;
+            } else {
+                buf.push(',');
+            }
+            let _ = write!(
+                buf,
+                "acceleration_x={},acceleration_y={},acceleration_z={}",
+                x, y, z
+            );
         }
-
-        fields
+        let _ = first; // suppress unused warning
     }
 
-    fn to_data_point(&self, measurement: &Measurement) -> DataPoint {
-        DataPoint {
-            measurement: self.measurement_name.clone(),
-            tag_set: self.tag_set(measurement),
-            field_set: self.field_set(measurement),
-            timestamp: Some(measurement.timestamp),
-        }
+    /// Write timestamp as nanoseconds since Unix epoch.
+    ///
+    /// If the timestamp is before Unix epoch (which shouldn't happen for sensor data),
+    /// writes 0 as a safe fallback rather than panicking.
+    #[inline]
+    fn write_timestamp(buf: &mut String, timestamp: SystemTime) {
+        let nanos = timestamp
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let _ = write!(buf, " {}", nanos);
     }
 }
 
 impl OutputFormatter for InfluxDbFormatter {
-    fn format(&self, measurement: &Measurement) -> String {
-        format!("{}", self.to_data_point(measurement))
+    /// Format a measurement to InfluxDB line protocol.
+    ///
+    /// This implementation writes directly to a pre-sized buffer, avoiding
+    /// intermediate allocations from BTreeMap and String clones.
+    fn format(&self, m: &Measurement) -> String {
+        // Pre-allocate buffer: measurement name + tags (~50 bytes) + fields (~200 bytes max)
+        // + timestamp (~20 bytes) = ~270 bytes typical, 300 with headroom
+        let mut buf = String::with_capacity(300);
+
+        // Write measurement name (borrowed, no clone)
+        buf.push_str(&self.measurement_name);
+
+        // Write tags directly
+        self.write_tags(&mut buf, m);
+
+        // Space separator between tags and fields
+        buf.push(' ');
+
+        // Write fields directly
+        self.write_fields(&mut buf, m);
+
+        // Write timestamp
+        Self::write_timestamp(&mut buf, m.timestamp);
+
+        buf
     }
 }
 
@@ -196,60 +172,6 @@ mod tests {
                 "expected output to contain {needle:?}\noutput: {haystack}"
             );
         }
-    }
-
-    #[test]
-    fn test_field_value_display() {
-        assert_eq!(format!("{}", FieldValue::Float(2.5)), "2.5");
-        assert_eq!(
-            format!("{}", FieldValue::String("test".to_string())),
-            "\"test\""
-        );
-    }
-
-    #[test]
-    fn test_data_point_format() {
-        let mut tags = BTreeMap::new();
-        tags.insert("name".to_string(), "test".to_string());
-        tags.insert("test".to_string(), "true".to_string());
-
-        let mut fields = BTreeMap::new();
-        fields.insert("temperature".to_string(), FieldValue::Float(32.0));
-        fields.insert("humidity".to_string(), FieldValue::Float(20.0));
-
-        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
-
-        let data_point = DataPoint {
-            measurement: "test".to_string(),
-            tag_set: tags,
-            field_set: fields,
-            timestamp: Some(time),
-        };
-        let result = format!("{}", data_point);
-
-        assert_eq!(
-            result,
-            "test,name=test,test=true humidity=20,temperature=32 1000000000000000000"
-        );
-    }
-
-    #[test]
-    fn test_data_point_without_timestamp() {
-        let tags = BTreeMap::new();
-        let mut fields = BTreeMap::new();
-        fields.insert(
-            "value".to_string(),
-            FieldValue::String("string,value".to_string()),
-        );
-
-        let data_point = DataPoint {
-            measurement: "test".to_string(),
-            tag_set: tags,
-            field_set: fields,
-            timestamp: None,
-        };
-        let result = format!("{}", data_point);
-        assert_eq!(result, "test value=\"string,value\"");
     }
 
     #[test]
