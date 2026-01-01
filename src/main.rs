@@ -1,126 +1,12 @@
-use clap::{Parser, ValueEnum};
-use std::io::Write;
+use clap::Parser;
 use std::panic::{self, PanicHookInfo};
-use std::time::Duration;
 
-mod alias;
-mod mac_address;
-mod measurement;
-mod output;
-mod scanner;
-mod throttle;
-
-use alias::{Alias, parse_alias};
-use measurement::Measurement;
-use output::OutputFormatter;
-use output::influxdb::InfluxDbFormatter;
-use scanner::Backend;
-use throttle::{Throttle, parse_duration};
+use ruuvitag_listener::app::{Options, RealScanner, RunError, run_with_io};
 
 /// Exit codes for the application
 const EXIT_SUCCESS: i32 = 0;
 const EXIT_ERROR: i32 = 1;
 const EXIT_PANIC: i32 = 2;
-
-/// CLI-compatible wrapper for Backend enum
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum BackendArg {
-    /// BlueZ D-Bus backend (requires bluetoothd daemon)
-    #[cfg(feature = "bluer")]
-    Bluer,
-    /// Raw HCI socket backend (direct kernel access, no daemon required)
-    #[cfg(feature = "hci")]
-    Hci,
-}
-
-impl From<BackendArg> for Backend {
-    fn from(arg: BackendArg) -> Self {
-        match arg {
-            #[cfg(feature = "bluer")]
-            BackendArg::Bluer => Backend::Bluer,
-            #[cfg(feature = "hci")]
-            BackendArg::Hci => Backend::Hci,
-        }
-    }
-}
-
-/// Returns the default backend argument as a string for CLI.
-const fn default_backend_str() -> &'static str {
-    #[cfg(feature = "bluer")]
-    {
-        "bluer"
-    }
-    #[cfg(all(feature = "hci", not(feature = "bluer")))]
-    {
-        "hci"
-    }
-    #[cfg(not(any(feature = "bluer", feature = "hci")))]
-    {
-        compile_error!("At least one backend feature must be enabled");
-    }
-}
-
-/// Returns a help string listing available backends.
-const fn backend_help() -> &'static str {
-    #[cfg(all(feature = "bluer", feature = "hci"))]
-    {
-        "Bluetooth scanner backend [available: bluer, hci]"
-    }
-    #[cfg(all(feature = "bluer", not(feature = "hci")))]
-    {
-        "Bluetooth scanner backend [available: bluer]"
-    }
-    #[cfg(all(feature = "hci", not(feature = "bluer")))]
-    {
-        "Bluetooth scanner backend [available: hci]"
-    }
-    #[cfg(not(any(feature = "bluer", feature = "hci")))]
-    {
-        compile_error!("At least one backend feature must be enabled");
-    }
-}
-
-#[derive(Parser, Debug)]
-#[command(author, about, version)]
-struct Options {
-    /// The name of the measurement in InfluxDB line protocol.
-    #[arg(long, default_value = "ruuvi_measurement")]
-    influxdb_measurement: String,
-
-    /// Specify human-readable alias for RuuviTag id.
-    /// Format: --alias DE:AD:BE:EF:00:00=Sauna
-    #[arg(long, value_parser = parse_alias)]
-    alias: Vec<Alias>,
-
-    /// Verbose output, print parse errors for unrecognized data
-    #[arg(short = 'v', long = "verbose")]
-    verbose: bool,
-
-    /// Throttle events per tag to at most one per interval.
-    /// Accepts duration with suffix: 3s, 1m, 500ms, 2h.
-    /// Without suffix, value is interpreted as seconds.
-    #[arg(long, value_parser = parse_duration)]
-    throttle: Option<Duration>,
-    /// Bluetooth scanner backend to use
-    #[arg(long, value_enum, default_value = default_backend_str(), help = backend_help())]
-    backend: BackendArg,
-}
-
-/// Print a formatted measurement to stdout.
-///
-/// # Arguments
-/// * `formatter` - The formatter to use for converting the measurement to a string
-/// * `measurement` - The measurement data to format and print
-///
-/// # Errors
-/// Returns an `io::Error` if writing to stdout fails
-fn print_measurement(
-    formatter: &dyn OutputFormatter,
-    measurement: &Measurement,
-) -> std::io::Result<()> {
-    let output = formatter.format(measurement);
-    writeln!(std::io::stdout(), "{}", output)
-}
 
 /// Main application entry point that sets up scanning and output formatting.
 ///
@@ -136,38 +22,11 @@ fn print_measurement(
 ///
 /// # Errors
 /// Returns `ScanError` if Bluetooth initialization fails
-async fn run(options: Options) -> Result<(), scanner::ScanError> {
-    let aliases = alias::to_map(&options.alias);
-    let formatter = InfluxDbFormatter::new(options.influxdb_measurement.clone(), aliases);
-    let backend: Backend = options.backend.into();
-
-    // Create throttle if interval is specified
-    let mut throttle = options.throttle.map(Throttle::new);
-
-    let mut measurements = scanner::start_scan(backend, options.verbose).await?;
-
-    while let Some(result) = measurements.recv().await {
-        match result {
-            Ok(measurement) => {
-                // Check throttle before emitting (Address is Copy, no allocation)
-                let should_emit = throttle
-                    .as_mut()
-                    .is_none_or(|t: &mut Throttle| t.should_emit(measurement.mac));
-
-                if should_emit && let Err(error) = print_measurement(&formatter, &measurement) {
-                    eprintln!("error: {}", error);
-                    std::process::exit(EXIT_ERROR);
-                }
-            }
-            Err(error) => {
-                if options.verbose {
-                    eprintln!("{}", error);
-                }
-            }
-        }
-    }
-
-    Ok(())
+async fn run(run_options: Options) -> Result<(), RunError> {
+    let scanner = RealScanner;
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
+    run_with_io(run_options, &scanner, &mut out, &mut err).await
 }
 
 #[tokio::main(flavor = "current_thread")]
