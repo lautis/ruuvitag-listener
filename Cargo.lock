@@ -618,6 +618,7 @@ dependencies = [
  "futures",
  "libc",
  "ruuvi-decoders",
+ "thiserror",
  "tokio",
  "tokio-test",
 ]

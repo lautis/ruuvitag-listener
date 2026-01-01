@@ -15,6 +15,7 @@ use std::io;
 use std::io::Write;
 use std::pin::Pin;
 use std::time::Duration;
+use thiserror::Error;
 use tokio::sync::mpsc;
 
 /// Returns the default backend argument as a string for CLI.
@@ -114,33 +115,12 @@ pub struct Options {
 }
 
 /// Errors returned by the core run loop.
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum RunError {
-    Scan(ScanError),
-    Io(io::Error),
-}
-
-impl std::fmt::Display for RunError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RunError::Scan(e) => write!(f, "{e}"),
-            RunError::Io(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl std::error::Error for RunError {}
-
-impl From<ScanError> for RunError {
-    fn from(value: ScanError) -> Self {
-        RunError::Scan(value)
-    }
-}
-
-impl From<io::Error> for RunError {
-    fn from(value: io::Error) -> Self {
-        RunError::Io(value)
-    }
+    #[error(transparent)]
+    Scan(#[from] ScanError),
+    #[error(transparent)]
+    Io(#[from] io::Error),
 }
 
 /// Scanner abstraction to enable deterministic unit tests without Bluetooth hardware.

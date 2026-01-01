@@ -6,6 +6,7 @@
 use std::fmt;
 use std::hash::Hash;
 use std::str::FromStr;
+use thiserror::Error;
 
 /// A Bluetooth MAC address stored as a compact 6-byte array.
 ///
@@ -24,25 +25,33 @@ impl fmt::Display for MacAddress {
     }
 }
 
+/// Errors returned when parsing a MAC address string.
+#[derive(Error, Debug, PartialEq)]
+pub enum ParseMacError {
+    #[error("invalid MAC address: expected 6 parts, got {0}")]
+    InvalidLength(usize),
+    #[error("invalid MAC address: part {0} has wrong length")]
+    InvalidPartLength(usize),
+    #[error("invalid MAC address: '{0}' is not valid hex")]
+    InvalidHex(String),
+}
+
 impl FromStr for MacAddress {
-    type Err = String;
+    type Err = ParseMacError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = s.split(':').collect();
         if parts.len() != 6 {
-            return Err(format!(
-                "invalid MAC address: expected 6 parts, got {}",
-                parts.len()
-            ));
+            return Err(ParseMacError::InvalidLength(parts.len()));
         }
 
         let mut bytes = [0u8; 6];
         for (i, part) in parts.iter().enumerate() {
             if part.len() != 2 {
-                return Err(format!("invalid MAC address: part {} has wrong length", i));
+                return Err(ParseMacError::InvalidPartLength(i));
             }
             bytes[i] = u8::from_str_radix(part, 16)
-                .map_err(|_| format!("invalid MAC address: '{}' is not valid hex", part))?;
+                .map_err(|_| ParseMacError::InvalidHex(part.to_string()))?;
         }
 
         Ok(MacAddress(bytes))
@@ -99,9 +108,18 @@ mod tests {
 
     #[test]
     fn test_from_str_invalid() {
-        assert!("invalid".parse::<MacAddress>().is_err());
-        assert!("AA:BB:CC".parse::<MacAddress>().is_err());
-        assert!("AA:BB:CC:DD:EE:GG".parse::<MacAddress>().is_err());
+        assert!(matches!(
+            "invalid".parse::<MacAddress>(),
+            Err(ParseMacError::InvalidLength(1))
+        ));
+        assert!(matches!(
+            "AA:BB:CC".parse::<MacAddress>(),
+            Err(ParseMacError::InvalidLength(3))
+        ));
+        assert!(matches!(
+            "AA:BB:CC:DD:EE:GG".parse::<MacAddress>(),
+            Err(ParseMacError::InvalidHex(_))
+        ));
     }
 
     #[test]
