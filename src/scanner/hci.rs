@@ -424,13 +424,13 @@ fn send_hci_command(fd: &OwnedFd, packet: &[u8]) -> Result<(), ScanError> {
 
 /// Configure LE scanning parameters
 fn configure_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
-    // Set scan parameters: passive scan, 100ms interval, 100ms window
+    // Set scan parameters: passive scan, 200ms interval, 200ms window
     // Using longer intervals reduces CPU usage significantly while still
     // catching RuuviTag broadcasts (which occur every ~1 second)
     let params = LeSetScanParametersCmd {
         scan_type: LE_SCAN_PASSIVE,
-        interval: 0x00A0, // 100ms in 0.625ms units (0xA0 = 160 * 0.625ms)
-        window: 0x00A0,   // 10ms in 0.625ms units (0xA0 = 160 * 0.625ms)
+        interval: 0x0140, // 200ms in 0.625ms units (0x140 = 320 * 0.625ms)
+        window: 0x0140,   // 200ms in 0.625ms units (0x140 = 320 * 0.625ms)
         own_address_type: LE_PUBLIC_ADDRESS,
         filter_policy: FILTER_POLICY_ACCEPT_ALL,
     };
