@@ -71,20 +71,36 @@ pub const MANUFACTURER_DATA_TYPE: u8 = 0xff;
 pub const MEASUREMENT_CHANNEL_BUFFER_SIZE: usize = 100;
 
 /// Available scanner backends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Backend {
     /// BlueZ D-Bus backend (requires bluetoothd daemon)
-    #[default]
+    #[cfg(feature = "bluer")]
     Bluer,
     /// Raw HCI socket backend (direct kernel access, no daemon required)
+    #[cfg(feature = "hci")]
     Hci,
+}
+
+impl Default for Backend {
+    fn default() -> Self {
+        #[cfg(feature = "bluer")]
+        return Backend::Bluer;
+        #[cfg(all(feature = "hci", not(feature = "bluer")))]
+        return Backend::Hci;
+        #[cfg(not(any(feature = "bluer", feature = "hci")))]
+        compile_error!("At least one backend feature must be enabled");
+    }
 }
 
 impl std::fmt::Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(feature = "bluer")]
             Backend::Bluer => write!(f, "bluer"),
+            #[cfg(feature = "hci")]
             Backend::Hci => write!(f, "hci"),
+            #[cfg(not(any(feature = "bluer", feature = "hci")))]
+            _ => unreachable!("Backend enum has no variants when no backend features are enabled"),
         }
     }
 }
@@ -94,7 +110,9 @@ impl std::str::FromStr for Backend {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
+            #[cfg(feature = "bluer")]
             "bluer" | "bluez" => Ok(Backend::Bluer),
+            #[cfg(feature = "hci")]
             "hci" | "raw" => Ok(Backend::Hci),
             _ => Err(format!("Unknown backend: {}", s)),
         }
@@ -206,36 +224,15 @@ fn decode_v6_measurement(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
 ///
 /// # Returns
 /// A receiver for measurements (or decode errors if verbose).
-///
-/// # Errors
-/// Returns `ScanError::BackendNotAvailable` if the requested backend was not compiled in.
 pub async fn start_scan(
     backend: Backend,
     verbose: bool,
 ) -> Result<mpsc::Receiver<MeasurementResult>, ScanError> {
     match backend {
-        Backend::Bluer => {
-            #[cfg(feature = "bluer")]
-            {
-                bluer::start_scan(verbose).await
-            }
-            #[cfg(not(feature = "bluer"))]
-            {
-                let _ = verbose;
-                Err(ScanError::BackendNotAvailable("bluer".into()))
-            }
-        }
-        Backend::Hci => {
-            #[cfg(feature = "hci")]
-            {
-                hci::start_scan(verbose).await
-            }
-            #[cfg(not(feature = "hci"))]
-            {
-                let _ = verbose;
-                Err(ScanError::BackendNotAvailable("hci".into()))
-            }
-        }
+        #[cfg(feature = "bluer")]
+        Backend::Bluer => bluer::start_scan(verbose).await,
+        #[cfg(feature = "hci")]
+        Backend::Hci => hci::start_scan(verbose).await,
     }
 }
 
