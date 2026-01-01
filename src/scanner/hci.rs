@@ -9,7 +9,10 @@ use super::{
     ScanError, decode_ruuvi_data,
 };
 use crate::mac_address::MacAddress;
-use libc::{AF_BLUETOOTH, SOCK_CLOEXEC, SOCK_RAW, c_int, c_void, sockaddr, socklen_t};
+use libc::{
+    AF_BLUETOOTH, SO_ATTACH_FILTER, SOCK_CLOEXEC, SOCK_RAW, SOL_SOCKET, c_int, c_void, sockaddr,
+    socklen_t,
+};
 use std::io;
 use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -51,6 +54,33 @@ const RUUVI_MANUFACTURER_ID_LE: [u8; 2] = [
     (RUUVI_MANUFACTURER_ID & 0xFF) as u8,
     (RUUVI_MANUFACTURER_ID >> 8) as u8,
 ];
+
+// BPF instruction codes
+const BPF_LD: u16 = 0x00;
+const BPF_JMP: u16 = 0x05;
+const BPF_RET: u16 = 0x06;
+const BPF_H: u16 = 0x08; // Half-word (16-bit)
+const BPF_B: u16 = 0x10; // Byte
+const BPF_ABS: u16 = 0x20;
+const BPF_JEQ: u16 = 0x10;
+const BPF_K: u16 = 0x00;
+
+/// BPF instruction structure (classic BPF, not eBPF)
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SockFilter {
+    code: u16,
+    jt: u8, // Jump if true
+    jf: u8, // Jump if false
+    k: u32, // Constant/offset
+}
+
+/// BPF program structure
+#[repr(C)]
+struct SockFprog {
+    len: u16,
+    filter: *const SockFilter,
+}
 
 /// HCI socket address structure
 #[repr(C)]
@@ -184,6 +214,160 @@ fn set_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
     if ret < 0 {
         return Err(ScanError::Bluetooth(format!(
             "Failed to set HCI filter: {}",
+            io::Error::last_os_error()
+        )));
+    }
+
+    Ok(())
+}
+
+/// Set up a BPF filter to match Ruuvi manufacturer ID at the kernel level.
+///
+/// This filter reduces CPU usage by discarding non-Ruuvi packets in the kernel
+/// before they reach userspace. The filter checks:
+/// 1. Packet type is HCI_EVENT_PKT (0x04)
+/// 2. Event code is EVT_LE_META_EVENT (0x3E)
+/// 3. Subevent is EVT_LE_ADVERTISING_REPORT (0x02)
+/// 4. Packet contains Ruuvi manufacturer ID (0x9904) at common positions
+fn set_bpf_ruuvi_filter(fd: &OwnedFd) -> Result<(), ScanError> {
+    // Ruuvi manufacturer ID as big-endian 16-bit value for BPF comparison
+    // BPF loads 16-bit values in network byte order (big-endian)
+    const RUUVI_ID_BE: u32 = 0x9904;
+
+    // Build BPF program that checks for Ruuvi manufacturer ID
+    // Classic BPF doesn't support loops, so we check multiple fixed offsets
+    // where manufacturer data typically appears in advertising reports.
+    //
+    // HCI LE Advertising Report structure:
+    // [0]: Packet type (0x04)
+    // [1]: Event code (0x3E)
+    // [2]: Parameter length
+    // [3]: Subevent code (0x02)
+    // [4]: Num reports
+    // [5]: Event type
+    // [6]: Address type
+    // [7-12]: Address (6 bytes)
+    // [13]: Data length
+    // [14+]: Advertising data (AD structures)
+    //
+    // AD structure: [length][type][data...]
+    // Manufacturer data (type 0xFF): [length][0xFF][mfg_id_lo][mfg_id_hi][data...]
+
+    // Generate check instructions for each offset from 14 to 45
+    // This covers the typical range where manufacturer data appears
+    let mut filter = Vec::with_capacity(100);
+
+    // Check packet type == HCI_EVENT_PKT (0x04)
+    filter.push(SockFilter {
+        code: BPF_LD | BPF_B | BPF_ABS,
+        jt: 0,
+        jf: 0,
+        k: 0,
+    });
+    filter.push(SockFilter {
+        code: BPF_JMP | BPF_JEQ | BPF_K,
+        jt: 0,
+        jf: 0, // Will be patched to jump to reject
+        k: HCI_EVENT_PKT as u32,
+    });
+
+    // Check event code == EVT_LE_META_EVENT (0x3E)
+    filter.push(SockFilter {
+        code: BPF_LD | BPF_B | BPF_ABS,
+        jt: 0,
+        jf: 0,
+        k: 1,
+    });
+    filter.push(SockFilter {
+        code: BPF_JMP | BPF_JEQ | BPF_K,
+        jt: 0,
+        jf: 0, // Will be patched
+        k: EVT_LE_META_EVENT as u32,
+    });
+
+    // Check subevent == EVT_LE_ADVERTISING_REPORT (0x02)
+    filter.push(SockFilter {
+        code: BPF_LD | BPF_B | BPF_ABS,
+        jt: 0,
+        jf: 0,
+        k: 3,
+    });
+    filter.push(SockFilter {
+        code: BPF_JMP | BPF_JEQ | BPF_K,
+        jt: 0,
+        jf: 0, // Will be patched
+        k: EVT_LE_ADVERTISING_REPORT as u32,
+    });
+
+    let checks_start = filter.len();
+
+    // Check for Ruuvi manufacturer ID at offsets 14-45
+    // (manufacturer data is typically within the first 32 bytes of ad data)
+    for offset in 14..=45 {
+        // Load 16-bit value at this offset
+        filter.push(SockFilter {
+            code: BPF_LD | BPF_H | BPF_ABS,
+            jt: 0,
+            jf: 0,
+            k: offset,
+        });
+        // Jump to accept if it matches Ruuvi ID
+        filter.push(SockFilter {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 0, // Will be patched to jump to accept
+            jf: 0, // Continue to next check
+            k: RUUVI_ID_BE,
+        });
+    }
+
+    // Reject: return 0 (drop packet)
+    let reject_idx = filter.len();
+    filter.push(SockFilter {
+        code: BPF_RET | BPF_K,
+        jt: 0,
+        jf: 0,
+        k: 0,
+    });
+
+    // Accept: return max packet size
+    let accept_idx = filter.len();
+    filter.push(SockFilter {
+        code: BPF_RET | BPF_K,
+        jt: 0,
+        jf: 0,
+        k: 0xFFFF,
+    });
+
+    // Patch jump targets
+    // Header checks (indices 1, 3, 5) jump to reject on failure
+    filter[1].jf = (reject_idx - 2) as u8;
+    filter[3].jf = (reject_idx - 4) as u8;
+    filter[5].jf = (reject_idx - 6) as u8;
+
+    // Manufacturer ID checks jump to accept on success
+    for i in 0..32 {
+        let check_idx = checks_start + i * 2 + 1; // The JEQ instruction
+        filter[check_idx].jt = (accept_idx - check_idx - 1) as u8;
+    }
+
+    let prog = SockFprog {
+        len: filter.len() as u16,
+        filter: filter.as_ptr(),
+    };
+
+    let ret = unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            SOL_SOCKET,
+            SO_ATTACH_FILTER,
+            &prog as *const SockFprog as *const c_void,
+            mem::size_of::<SockFprog>() as socklen_t,
+        )
+    };
+
+    if ret < 0 {
+        return Err(ScanError::Bluetooth(format!(
+            "Failed to set BPF filter: {}",
             io::Error::last_os_error()
         )));
     }
@@ -360,6 +544,7 @@ pub async fn start_scan(verbose: bool) -> Result<mpsc::Receiver<MeasurementResul
     let fd = open_hci_socket()?;
     bind_hci_socket(&fd, 0)?; // Bind to hci0 to receive advertising events
     set_hci_filter(&fd)?;
+    set_bpf_ruuvi_filter(&fd)?; // Kernel-level filtering for Ruuvi packets
 
     // We need a separate socket for sending commands (bound to specific device)
     let cmd_fd = open_hci_socket()?;
