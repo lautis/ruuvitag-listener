@@ -28,7 +28,7 @@ pub struct Options {
 
     /// Specify human-readable alias for RuuviTag id.
     /// Format: --alias DE:AD:BE:EF:00:00=Sauna
-    #[arg(long, value_parser = crate::alias::parse_alias)]
+    #[arg(long = "alias", value_parser = crate::alias::parse_alias, value_name = "ALIAS")]
     pub aliases: Vec<Alias>,
 
     /// Verbose output, print parse errors for unrecognized data
