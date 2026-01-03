@@ -1,7 +1,7 @@
 [package]
 name = "ruuvitag-listener"
 description = "Print RuuviTag measurements in Telegraf compatible format"
-version = "0.6.1"
+version = "0.7.0"
 license = "MIT"
 authors = ["Ville Lautanala <lautis@gmail.com>"]
 repository = "https://github.com/lautis/ruuvitag-listener"
