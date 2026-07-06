@@ -2,6 +2,22 @@
 
 use crate::mac_address::MacAddress;
 
+/// The RuuviTag advertisement data format a measurement was decoded from.
+///
+/// Data format 6 is a compact variant that exists only for Bluetooth 4
+/// compatibility; its fields are a strict subset of E1 (Ruuvi Air). When a
+/// device is seen emitting E1, its V6 frames carry no additional data and can
+/// be dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// Data format 5 (RAWv2).
+    V5,
+    /// Data format 6 (compact, Bluetooth 4 compatibility).
+    V6,
+    /// Data format E1 (Ruuvi Air); superset of V6.
+    E1,
+}
+
 /// A measurement from a RuuviTag sensor.
 ///
 /// All values are in standard SI units:
@@ -19,6 +35,8 @@ use crate::mac_address::MacAddress;
 pub struct Measurement {
     /// MAC address of the RuuviTag (stored as efficient 6-byte array)
     pub mac: MacAddress,
+    /// The advertisement data format this measurement was decoded from
+    pub format: Format,
     /// Timestamp when the measurement was taken
     pub timestamp: std::time::SystemTime,
     /// Temperature in Celsius
@@ -37,8 +55,14 @@ pub struct Measurement {
     pub measurement_sequence: Option<u32>,
     /// Acceleration vector (x, y, z) in g
     pub acceleration: Option<(f64, f64, f64)>,
+    /// Particulate matter (PM1.0) concentration in ug/m3
+    pub pm1_0: Option<f64>,
     /// Particulate matter (PM2.5) concentration in ug/m3
     pub pm2_5: Option<f64>,
+    /// Particulate matter (PM4.0) concentration in ug/m3
+    pub pm4_0: Option<f64>,
+    /// Particulate matter (PM10.0) concentration in ug/m3
+    pub pm10_0: Option<f64>,
     /// Carbon dioxide concentration in ppm
     pub co2: Option<f64>,
     /// Volatile organic compound index

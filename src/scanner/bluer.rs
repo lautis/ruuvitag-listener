@@ -4,12 +4,11 @@
 //! via D-Bus. It requires the `bluetoothd` daemon to be running.
 
 use super::{
-    DecodeError, MANUFACTURER_DATA_TYPE, MEASUREMENT_CHANNEL_BUFFER_SIZE, MeasurementResult,
-    RUUVI_MANUFACTURER_ID, RUUVI_MANUFACTURER_ID_BYTES, ScanError, decode_ruuvi_data,
+    DecodeError, MEASUREMENT_CHANNEL_BUFFER_SIZE, MeasurementResult, RUUVI_MANUFACTURER_ID,
+    ScanError, decode_ruuvi_data,
 };
 use crate::mac_address::MacAddress;
-use bluer::monitor::{Monitor, MonitorEvent, Pattern};
-use bluer::{Adapter, Address, Session};
+use bluer::{Adapter, AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport, Session};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
@@ -35,32 +34,35 @@ pub async fn start_scan(verbose: bool) -> Result<mpsc::Receiver<MeasurementResul
     let adapter = session.default_adapter().await?;
     adapter.set_powered(true).await?;
 
-    let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
-
-    // Create a pattern to filter for Ruuvi manufacturer data
-    let pattern = Pattern {
-        data_type: MANUFACTURER_DATA_TYPE,
-        start_position: 0,
-        content: RUUVI_MANUFACTURER_ID_BYTES.to_vec(),
-    };
-
-    let monitor_manager = adapter.monitor().await?;
-    let mut monitor_handle = monitor_manager
-        .register(Monitor {
-            patterns: Some(vec![pattern]),
+    // Enable `duplicate_data` so BlueZ emits a PropertiesChanged signal for
+    // *every* advertisement, not just the first one or when the payload
+    // changes. Without this, BlueZ deduplicates repeated advertisements and we
+    // receive only a fraction of the broadcasts a tool like `bluetoothctl`
+    // shows. LE-only transport avoids spurious BR/EDR inquiry traffic.
+    adapter
+        .set_discovery_filter(DiscoveryFilter {
+            transport: DiscoveryTransport::Le,
+            duplicate_data: true,
             ..Default::default()
         })
         .await?;
 
+    let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
+
+    // `discover_devices_with_changes` re-emits a `DeviceAdded` event for a
+    // device each time its properties change, giving us one notification per
+    // advertisement. We filter for RuuviTag manufacturer data in
+    // `process_device`.
+    let mut events = adapter.discover_devices_with_changes().await?;
+
     // Spawn a task that owns all Bluetooth state and runs the event loop
     tokio::spawn(async move {
-        // Keep all Bluetooth state alive by moving it into this task
+        // Keep the session alive by moving it into this task
         let _session = session;
-        let _monitor_manager = monitor_manager;
 
-        while let Some(event) = monitor_handle.next().await {
-            if let MonitorEvent::DeviceFound(device_id) = event
-                && let Err(e) = process_device(&adapter, device_id.device, &tx, verbose).await
+        while let Some(event) = events.next().await {
+            if let AdapterEvent::DeviceAdded(address) = event
+                && let Err(e) = process_device(&adapter, address, &tx, verbose).await
                 && verbose
             {
                 let err = match e {

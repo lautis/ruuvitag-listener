@@ -28,14 +28,30 @@ const HCI_EVENT_PKT: u8 = 0x04;
 
 // HCI events
 const EVT_LE_META_EVENT: u8 = 0x3E;
+const EVT_CMD_COMPLETE: u8 = 0x0E;
 
 // LE Meta event sub-events
 const EVT_LE_ADVERTISING_REPORT: u8 = 0x02;
+const EVT_LE_EXTENDED_ADVERTISING_REPORT: u8 = 0x0D;
 
 // HCI commands
 const OGF_LE_CTL: u16 = 0x08;
+const OCF_LE_READ_LOCAL_SUPPORTED_FEATURES: u16 = 0x0003;
 const OCF_LE_SET_SCAN_PARAMETERS: u16 = 0x000B;
 const OCF_LE_SET_SCAN_ENABLE: u16 = 0x000C;
+const OCF_LE_SET_EXTENDED_SCAN_PARAMETERS: u16 = 0x0041;
+const OCF_LE_SET_EXTENDED_SCAN_ENABLE: u16 = 0x0042;
+
+// LE feature bits (from LE Read Local Supported Features)
+// Bit 12 (byte 1, bit 4) = LE Extended Advertising
+const LE_FEATURE_EXTENDED_ADVERTISING_BYTE: usize = 1;
+const LE_FEATURE_EXTENDED_ADVERTISING_BIT: u8 = 1 << 4;
+
+// Scanning PHYs bitmask for extended scan (bit 0 = LE 1M PHY)
+const LE_1M_PHY: u8 = 0x01;
+
+// How long to wait for an HCI command's Command Complete event
+const COMMAND_TIMEOUT_MS: u64 = 1000;
 
 // Scan types
 const LE_SCAN_PASSIVE: u8 = 0x00;
@@ -134,6 +150,30 @@ struct LeSetScanEnableCmd {
     filter_dup: u8,
 }
 
+/// LE Set Extended Scan Parameters command (Bluetooth 5.x).
+///
+/// This variant carries one parameter block per scanning PHY. We only ever
+/// scan on the LE 1M PHY (`scanning_phys == LE_1M_PHY`), so exactly one
+/// `{scan_type, interval, window}` block follows the PHY bitmask.
+#[repr(C, packed)]
+struct LeSetExtendedScanParametersCmd {
+    own_address_type: u8,
+    filter_policy: u8,
+    scanning_phys: u8,
+    scan_type: u8,
+    interval: u16,
+    window: u16,
+}
+
+/// LE Set Extended Scan Enable command (Bluetooth 5.x).
+#[repr(C, packed)]
+struct LeSetExtendedScanEnableCmd {
+    enable: u8,
+    filter_dup: u8,
+    duration: u16,
+    period: u16,
+}
+
 /// Create an HCI command packet
 fn hci_command_packet(ogf: u16, ocf: u16, params: &[u8]) -> Vec<u8> {
     let opcode = (ogf << 10) | ocf;
@@ -214,13 +254,30 @@ fn set_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
     let mut filter = HciFilter::new();
     filter.set_ptype(HCI_EVENT_PKT); // Only HCI event packets (0x04)
     filter.set_event(EVT_LE_META_EVENT); // Only LE Meta Events (0x3E)
+    apply_hci_filter(fd, &filter)
+}
 
+/// Set an HCI filter that only lets Command Complete events through.
+///
+/// The command socket needs this so we can read back the controller's response
+/// to setup commands (feature query, scan enable). A freshly opened HCI raw
+/// socket has an all-zero filter that drops *every* packet, so without this the
+/// command responses would never reach userspace.
+fn set_command_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
+    let mut filter = HciFilter::new();
+    filter.set_ptype(HCI_EVENT_PKT);
+    filter.set_event(EVT_CMD_COMPLETE);
+    apply_hci_filter(fd, &filter)
+}
+
+/// Apply an [`HciFilter`] to a socket via `setsockopt(SOL_HCI, HCI_FILTER)`.
+fn apply_hci_filter(fd: &OwnedFd, filter: &HciFilter) -> Result<(), ScanError> {
     let ret = unsafe {
         libc::setsockopt(
             fd.as_raw_fd(),
             0, // SOL_HCI
             HCI_FILTER,
-            &filter as *const HciFilter as *const c_void,
+            filter as *const HciFilter as *const c_void,
             mem::size_of::<HciFilter>() as socklen_t,
         )
     };
@@ -280,11 +337,16 @@ fn set_bpf_ruuvi_filter(fd: &OwnedFd) -> Result<(), ScanError> {
     // AD structure: [length][type][data...]
     // Manufacturer data (type 0xFF): [length][0xFF][mfg_id_lo][mfg_id_hi][data...]
 
-    // Generate check instructions for each offset from 14 to 45
-    // This covers the typical range where manufacturer data appears
-    let mut filter = Vec::with_capacity(100);
+    // Manufacturer data starts at offset 14 in a legacy report but at offset 29
+    // in an extended report (the per-report header is larger). We scan a single
+    // wide range that covers both layouts.
+    const FIRST_OFFSET: u32 = 14;
+    const LAST_OFFSET: u32 = 60;
+    let num_offsets = (LAST_OFFSET - FIRST_OFFSET + 1) as usize;
 
-    // Check packet type == HCI_EVENT_PKT (0x04)
+    let mut filter = Vec::with_capacity(num_offsets * 2 + 16);
+
+    // [0,1] Check packet type == HCI_EVENT_PKT (0x04)
     filter.push(SockFilter {
         code: BPF_LD | BPF_B | BPF_ABS,
         jt: 0,
@@ -298,7 +360,7 @@ fn set_bpf_ruuvi_filter(fd: &OwnedFd) -> Result<(), ScanError> {
         k: HCI_EVENT_PKT as u32,
     });
 
-    // Check event code == EVT_LE_META_EVENT (0x3E)
+    // [2,3] Check event code == EVT_LE_META_EVENT (0x3E)
     filter.push(SockFilter {
         code: BPF_LD | BPF_B | BPF_ABS,
         jt: 0,
@@ -312,25 +374,33 @@ fn set_bpf_ruuvi_filter(fd: &OwnedFd) -> Result<(), ScanError> {
         k: EVT_LE_META_EVENT as u32,
     });
 
-    // Check subevent == EVT_LE_ADVERTISING_REPORT (0x02)
+    // [4] Load subevent code, then accept either the legacy or the extended
+    // advertising report subevent.
     filter.push(SockFilter {
         code: BPF_LD | BPF_B | BPF_ABS,
         jt: 0,
         jf: 0,
         k: 3,
     });
+    // [5] subevent == EVT_LE_ADVERTISING_REPORT (0x02): jump to mfg-id checks
     filter.push(SockFilter {
         code: BPF_JMP | BPF_JEQ | BPF_K,
-        jt: 0,
-        jf: 0, // Will be patched
+        jt: 0, // Will be patched to jump to checks_start
+        jf: 0, // Fall through to the extended check below
         k: EVT_LE_ADVERTISING_REPORT as u32,
+    });
+    // [6] subevent == EVT_LE_EXTENDED_ADVERTISING_REPORT (0x0D): otherwise reject
+    filter.push(SockFilter {
+        code: BPF_JMP | BPF_JEQ | BPF_K,
+        jt: 0, // Will be patched to jump to checks_start
+        jf: 0, // Will be patched to jump to reject
+        k: EVT_LE_EXTENDED_ADVERTISING_REPORT as u32,
     });
 
     let checks_start = filter.len();
 
-    // Check for Ruuvi manufacturer ID at offsets 14-45
-    // (manufacturer data is typically within the first 32 bytes of ad data)
-    for offset in 14..=45 {
+    // Check for the Ruuvi manufacturer ID at each candidate offset.
+    for offset in FIRST_OFFSET..=LAST_OFFSET {
         // Load 16-bit value at this offset
         filter.push(SockFilter {
             code: BPF_LD | BPF_H | BPF_ABS,
@@ -365,14 +435,20 @@ fn set_bpf_ruuvi_filter(fd: &OwnedFd) -> Result<(), ScanError> {
         k: 0xFFFF,
     });
 
-    // Patch jump targets
-    // Header checks (indices 1, 3, 5) jump to reject on failure
-    filter[1].jf = (reject_idx - 2) as u8;
-    filter[3].jf = (reject_idx - 4) as u8;
-    filter[5].jf = (reject_idx - 6) as u8;
+    // Patch jump targets. A BPF jump offset is relative to the instruction
+    // *after* the jump, so the offset to reach `target` from index `i` is
+    // `target - i - 1`.
+    // Packet-type and event-code checks reject on mismatch.
+    filter[1].jf = (reject_idx - 1 - 1) as u8;
+    filter[3].jf = (reject_idx - 3 - 1) as u8;
+    // Subevent dispatch: both report types branch to the mfg-id checks; a
+    // non-advertising LE Meta Event is rejected.
+    filter[5].jt = (checks_start - 5 - 1) as u8;
+    filter[6].jt = (checks_start - 6 - 1) as u8;
+    filter[6].jf = (reject_idx - 6 - 1) as u8;
 
     // Manufacturer ID checks jump to accept on success
-    for i in 0..32 {
+    for i in 0..num_offsets {
         let check_idx = checks_start + i * 2 + 1; // The JEQ instruction
         filter[check_idx].jt = (accept_idx - check_idx - 1) as u8;
     }
@@ -422,8 +498,129 @@ fn send_hci_command(fd: &OwnedFd, packet: &[u8]) -> Result<(), ScanError> {
     Ok(())
 }
 
-/// Configure LE scanning parameters
+/// Wait for the Command Complete event matching `expected_opcode`.
+///
+/// The command socket is non-blocking, so we `poll(2)` for readiness and read
+/// events until the one for our command arrives (or we time out). Unrelated
+/// Command Complete events from other openers of the controller are skipped.
+fn read_command_complete(fd: &OwnedFd, expected_opcode: u16) -> Result<Vec<u8>, ScanError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(COMMAND_TIMEOUT_MS);
+    let mut buf = [0u8; 258];
+
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(ScanError::Bluetooth(
+                "Timed out waiting for HCI command response".into(),
+            ));
+        }
+
+        let mut pfd = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ret = unsafe { libc::poll(&mut pfd, 1, remaining.as_millis() as c_int) };
+        if ret < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(ScanError::Bluetooth(format!("poll failed: {err}")));
+        }
+        if ret == 0 {
+            return Err(ScanError::Bluetooth(
+                "Timed out waiting for HCI command response".into(),
+            ));
+        }
+
+        let n = unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr() as *mut c_void, buf.len()) };
+        if n < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::WouldBlock || err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(ScanError::Bluetooth(format!("read failed: {err}")));
+        }
+
+        let n = n as usize;
+        // Command Complete: [0]=pkt type, [1]=event, [2]=plen, [3]=num cmds,
+        // [4..6]=opcode (LE), [6..]=return params (status first).
+        if n >= 6 && buf[0] == HCI_EVENT_PKT && buf[1] == EVT_CMD_COMPLETE {
+            let opcode = u16::from_le_bytes([buf[4], buf[5]]);
+            if opcode == expected_opcode {
+                return Ok(buf[..n].to_vec());
+            }
+        }
+    }
+}
+
+/// Send an HCI command and verify its Command Complete status is success.
+///
+/// Returns the full Command Complete event so callers can read additional
+/// return parameters. Surfacing a non-zero status here turns what used to be a
+/// silent "no events ever arrive" failure into an explicit error.
+fn send_hci_command_checked(
+    fd: &OwnedFd,
+    ogf: u16,
+    ocf: u16,
+    params: &[u8],
+) -> Result<Vec<u8>, ScanError> {
+    let packet = hci_command_packet(ogf, ocf, params);
+    send_hci_command(fd, &packet)?;
+
+    let opcode = (ogf << 10) | ocf;
+    let event = read_command_complete(fd, opcode)?;
+
+    // Status is the first return parameter, at byte 6.
+    let status = *event
+        .get(6)
+        .ok_or_else(|| ScanError::Bluetooth("Truncated HCI Command Complete event".to_string()))?;
+    if status != 0 {
+        return Err(ScanError::Bluetooth(format!(
+            "HCI command {opcode:#06x} failed with status {status:#04x}"
+        )));
+    }
+
+    Ok(event)
+}
+
+/// Query whether the controller supports LE Extended Advertising.
+///
+/// Reads the LE features bitmap and checks the Extended Advertising bit. A
+/// Bluetooth 5 controller (e.g. Intel AX210) reports advertisements via
+/// Extended Advertising Reports once extended scanning is enabled, so we must
+/// drive it with the extended scan commands instead of the legacy ones.
+fn controller_supports_extended_scan(fd: &OwnedFd) -> Result<bool, ScanError> {
+    let event =
+        send_hci_command_checked(fd, OGF_LE_CTL, OCF_LE_READ_LOCAL_SUPPORTED_FEATURES, &[])?;
+
+    // Return params after status (byte 6) are the 8-byte LE features bitmap.
+    let features_start = 7;
+    match event.get(features_start + LE_FEATURE_EXTENDED_ADVERTISING_BYTE) {
+        Some(byte) => Ok(byte & LE_FEATURE_EXTENDED_ADVERTISING_BIT != 0),
+        None => Ok(false),
+    }
+}
+
+/// Configure LE scanning, preferring extended scanning when the controller
+/// supports it.
 fn configure_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
+    if controller_supports_extended_scan(fd)? {
+        configure_extended_le_scan(fd)
+    } else {
+        configure_legacy_le_scan(fd)
+    }
+}
+
+/// Configure legacy (Bluetooth 4.x) LE scanning parameters.
+fn configure_legacy_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
+    // Setting scan parameters is rejected with "Command Disallowed" while
+    // scanning is already active (e.g. bluetoothd is running a discovery), so
+    // disable scanning first. Disabling when already disabled is a harmless
+    // no-op.
+    set_legacy_scan_enable(fd, false)?;
+
     // Set scan parameters: passive scan, 200ms interval, 200ms window
     // Using longer intervals reduces CPU usage significantly while still
     // catching RuuviTag broadcasts (which occur every ~1 second)
@@ -442,25 +639,89 @@ fn configure_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
         )
     };
 
-    let packet = hci_command_packet(OGF_LE_CTL, OCF_LE_SET_SCAN_PARAMETERS, params_bytes);
-    send_hci_command(fd, &packet)?;
+    send_hci_command_checked(fd, OGF_LE_CTL, OCF_LE_SET_SCAN_PARAMETERS, params_bytes)?;
 
-    // Enable scanning
-    let enable = LeSetScanEnableCmd {
-        enable: 0x01,
+    set_legacy_scan_enable(fd, true)?;
+
+    Ok(())
+}
+
+/// Enable or disable legacy LE scanning.
+fn set_legacy_scan_enable(fd: &OwnedFd, enable: bool) -> Result<(), ScanError> {
+    let cmd = LeSetScanEnableCmd {
+        enable: enable as u8,
         filter_dup: 0x00, // Don't filter duplicates
     };
 
-    let enable_bytes = unsafe {
+    let bytes = unsafe {
         std::slice::from_raw_parts(
-            &enable as *const LeSetScanEnableCmd as *const u8,
+            &cmd as *const LeSetScanEnableCmd as *const u8,
             mem::size_of::<LeSetScanEnableCmd>(),
         )
     };
 
-    let packet = hci_command_packet(OGF_LE_CTL, OCF_LE_SET_SCAN_ENABLE, enable_bytes);
-    send_hci_command(fd, &packet)?;
+    send_hci_command_checked(fd, OGF_LE_CTL, OCF_LE_SET_SCAN_ENABLE, bytes)?;
+    Ok(())
+}
 
+/// Configure extended (Bluetooth 5.x) LE scanning parameters.
+///
+/// Mirrors the legacy configuration (passive scan, 200ms interval/window on the
+/// LE 1M PHY) using the extended scan commands. Controllers that have been put
+/// into extended mode only report advertisements via Extended Advertising
+/// Reports, so the legacy `LE Set Scan Enable` command would be rejected.
+fn configure_extended_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
+    // Setting scan parameters is rejected with "Command Disallowed" while
+    // scanning is already active (e.g. bluetoothd is running a discovery), so
+    // disable scanning first. Disabling when already disabled is a harmless
+    // no-op.
+    set_extended_scan_enable(fd, false)?;
+
+    let params = LeSetExtendedScanParametersCmd {
+        own_address_type: LE_PUBLIC_ADDRESS,
+        filter_policy: FILTER_POLICY_ACCEPT_ALL,
+        scanning_phys: LE_1M_PHY,
+        scan_type: LE_SCAN_PASSIVE,
+        interval: 0x0140, // 200ms in 0.625ms units
+        window: 0x0140,   // 200ms in 0.625ms units
+    };
+
+    let params_bytes = unsafe {
+        std::slice::from_raw_parts(
+            &params as *const LeSetExtendedScanParametersCmd as *const u8,
+            mem::size_of::<LeSetExtendedScanParametersCmd>(),
+        )
+    };
+
+    send_hci_command_checked(
+        fd,
+        OGF_LE_CTL,
+        OCF_LE_SET_EXTENDED_SCAN_PARAMETERS,
+        params_bytes,
+    )?;
+
+    set_extended_scan_enable(fd, true)?;
+
+    Ok(())
+}
+
+/// Enable or disable extended LE scanning (continuous: duration = period = 0).
+fn set_extended_scan_enable(fd: &OwnedFd, enable: bool) -> Result<(), ScanError> {
+    let cmd = LeSetExtendedScanEnableCmd {
+        enable: enable as u8,
+        filter_dup: 0x00, // Don't filter duplicates
+        duration: 0x0000,
+        period: 0x0000,
+    };
+
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            &cmd as *const LeSetExtendedScanEnableCmd as *const u8,
+            mem::size_of::<LeSetExtendedScanEnableCmd>(),
+        )
+    };
+
+    send_hci_command_checked(fd, OGF_LE_CTL, OCF_LE_SET_EXTENDED_SCAN_ENABLE, bytes)?;
     Ok(())
 }
 
@@ -473,7 +734,7 @@ fn might_be_ruuvi(data: &[u8]) -> bool {
     data.windows(2).any(|w| w == RUUVI_MANUFACTURER_ID_LE)
 }
 
-/// Parse LE advertising report and extract RuuviTag data
+/// Parse a legacy LE Advertising Report (subevent 0x02) and extract RuuviTag data.
 fn parse_advertising_report(data: &[u8], verbose: bool) -> Option<MeasurementResult> {
     // Minimum size for an advertising report
     if data.len() < 12 {
@@ -499,30 +760,72 @@ fn parse_advertising_report(data: &[u8], verbose: bool) -> Option<MeasurementRes
         return None;
     }
 
-    // Parse first report (we process one at a time)
-    // Skip: num_reports(1) + event_type(1) + addr_type(1)
-    if report.len() < 9 {
+    // Legacy per-report header:
+    //   num_reports(1) event_type(1) addr_type(1) address(6) data_len(1) data(..)
+    // Extract address (6 bytes, in reverse order)
+    if report.len() < 10 {
         return None;
     }
-
-    // Extract address (6 bytes, in reverse order)
     let mut addr = [0u8; 6];
     addr.copy_from_slice(&report[3..9]);
     addr.reverse(); // HCI uses little-endian address
 
-    // Data length
-    if report.len() < 10 {
-        return None;
-    }
     let data_len = report[9] as usize;
-
     if report.len() < 10 + data_len {
         return None;
     }
 
-    let ad_data = &report[10..10 + data_len];
+    parse_ruuvi_from_ad_data(&report[10..10 + data_len], addr)
+}
 
-    // Parse AD structures to find manufacturer data
+/// Parse an LE Extended Advertising Report (subevent 0x0D) and extract RuuviTag data.
+///
+/// Bluetooth 5 controllers report advertisements with this event once extended
+/// scanning is enabled. Its per-report header is larger than the legacy one and
+/// carries PHY/SID/TX-power fields before the advertising data.
+fn parse_extended_advertising_report(data: &[u8], _verbose: bool) -> Option<MeasurementResult> {
+    // Skip HCI header (pkt type + event code + param len + subevent)
+    let report = data.get(4..)?;
+
+    // Number of reports
+    let num_reports = *report.first()?;
+    if num_reports == 0 {
+        return None;
+    }
+
+    // Extended per-report header (relative to `report`):
+    //   [0]      num_reports
+    //   [1..3]   event_type (2)
+    //   [3]      address_type
+    //   [4..10]  address (6)
+    //   [10]     primary_phy
+    //   [11]     secondary_phy
+    //   [12]     advertising_sid
+    //   [13]     tx_power
+    //   [14]     rssi
+    //   [15..17] periodic_advertising_interval (2)
+    //   [17]     direct_address_type
+    //   [18..24] direct_address (6)
+    //   [24]     data_length
+    //   [25..]   data
+    if report.len() < 25 {
+        return None;
+    }
+    let mut addr = [0u8; 6];
+    addr.copy_from_slice(&report[4..10]);
+    addr.reverse(); // HCI uses little-endian address
+
+    let data_len = report[24] as usize;
+    if report.len() < 25 + data_len {
+        return None;
+    }
+
+    parse_ruuvi_from_ad_data(&report[25..25 + data_len], addr)
+}
+
+/// Walk the AD structures of an advertisement and decode any RuuviTag
+/// manufacturer data found.
+fn parse_ruuvi_from_ad_data(ad_data: &[u8], addr: [u8; 6]) -> Option<MeasurementResult> {
     let mut offset = 0;
     while offset + 2 <= ad_data.len() {
         let len = ad_data[offset] as usize;
@@ -539,9 +842,7 @@ fn parse_advertising_report(data: &[u8], verbose: bool) -> Option<MeasurementRes
             if mfg_id == RUUVI_MANUFACTURER_ID {
                 // Found RuuviTag data
                 let ruuvi_data = &ad_data[offset + 4..offset + 1 + len];
-                let mac = MacAddress(addr);
-
-                return Some(decode_ruuvi_data(mac, ruuvi_data));
+                return Some(decode_ruuvi_data(MacAddress(addr), ruuvi_data));
             }
         }
 
@@ -582,9 +883,12 @@ pub async fn start_scan(verbose: bool) -> Result<mpsc::Receiver<MeasurementResul
     set_hci_filter(&fd)?;
     set_bpf_ruuvi_filter(&fd)?; // Kernel-level filtering for Ruuvi packets
 
-    // We need a separate socket for sending commands (bound to specific device)
+    // We need a separate socket for sending commands (bound to specific device).
+    // It needs a filter that lets Command Complete events through so we can read
+    // back command results and detect Bluetooth 5 extended-advertising support.
     let cmd_fd = open_hci_socket()?;
     bind_hci_socket(&cmd_fd, 0)?; // Bind to hci0
+    set_command_hci_filter(&cmd_fd)?;
     configure_le_scan(&cmd_fd)?;
 
     let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
@@ -627,14 +931,23 @@ pub async fn start_scan(verbose: bool) -> Result<mpsc::Receiver<MeasurementResul
                     Err(_) => break,     // WouldBlock - no more data
                 };
 
-                // Check if this is an LE advertising report that might be from a RuuviTag
+                // Check if this is an LE advertising report that might be from a
+                // RuuviTag. Controllers emit legacy reports (0x02) or, in
+                // extended/Bluetooth 5 mode, extended reports (0x0D).
                 if n >= 4 && buf[0] == HCI_EVENT_PKT && buf[1] == EVT_LE_META_EVENT {
                     let subevent = buf[3];
                     // Quick check for Ruuvi manufacturer ID before expensive parsing
-                    if subevent == EVT_LE_ADVERTISING_REPORT
-                        && might_be_ruuvi(&buf[..n])
-                        && let Some(result) = parse_advertising_report(&buf[..n], verbose)
-                    {
+                    let result = if !might_be_ruuvi(&buf[..n]) {
+                        None
+                    } else if subevent == EVT_LE_ADVERTISING_REPORT {
+                        parse_advertising_report(&buf[..n], verbose)
+                    } else if subevent == EVT_LE_EXTENDED_ADVERTISING_REPORT {
+                        parse_extended_advertising_report(&buf[..n], verbose)
+                    } else {
+                        None
+                    };
+
+                    if let Some(result) = result {
                         match &result {
                             Ok(_) => {
                                 let _ = tx.send(result).await;
@@ -696,5 +1009,50 @@ mod tests {
     fn test_might_be_ruuvi_empty() {
         assert!(!might_be_ruuvi(&[]));
         assert!(!might_be_ruuvi(&[0x99])); // Only one byte, can't match 2-byte pattern
+    }
+
+    /// Build a minimal RuuviTag RAWv2 (data format 5) manufacturer payload.
+    fn ruuvi_rawv2_payload() -> Vec<u8> {
+        // 0x9904 manufacturer id + 24 bytes of format-5 data
+        let mut data = vec![0x99, 0x04];
+        data.push(0x05); // data format 5
+        data.extend(std::iter::repeat_n(0x00, 23));
+        data
+    }
+
+    #[test]
+    fn test_parse_extended_advertising_report() {
+        let payload = ruuvi_rawv2_payload();
+        // AD structure: [len][type=0xFF][payload...]
+        let mut ad = vec![(payload.len() + 1) as u8, AD_TYPE_MANUFACTURER_DATA];
+        ad.extend_from_slice(&payload);
+
+        // HCI header + extended report header + data
+        let mut pkt = vec![
+            HCI_EVENT_PKT,
+            EVT_LE_META_EVENT,
+            0x00,
+            EVT_LE_EXTENDED_ADVERTISING_REPORT,
+        ];
+        pkt.push(0x01); // num_reports
+        pkt.extend_from_slice(&[0x00, 0x00]); // event_type
+        pkt.push(0x00); // address_type
+        pkt.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]); // address (LE)
+        pkt.extend_from_slice(&[0x01, 0x01, 0x00, 0x7F, 0xC3]); // primary/secondary phy, sid, tx_power, rssi
+        pkt.extend_from_slice(&[0x00, 0x00]); // periodic interval
+        pkt.push(0x00); // direct_address_type
+        pkt.extend_from_slice(&[0x00; 6]); // direct_address
+        pkt.push(ad.len() as u8); // data_length
+        pkt.extend_from_slice(&ad);
+
+        assert!(might_be_ruuvi(&pkt));
+        let result = parse_extended_advertising_report(&pkt, false);
+        assert!(result.is_some(), "expected a RuuviTag measurement");
+        let measurement = result.unwrap().expect("payload should decode");
+        // Address is little-endian on the wire, so it reverses on decode.
+        assert_eq!(
+            measurement.mac,
+            MacAddress([0x06, 0x05, 0x04, 0x03, 0x02, 0x01])
+        );
     }
 }

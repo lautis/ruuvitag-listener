@@ -4,12 +4,14 @@
 //! so it can be tested deterministically.
 
 use crate::alias::{Alias, AliasMap};
-use crate::measurement::Measurement;
+use crate::mac_address::MacAddress;
+use crate::measurement::{Format, Measurement};
 use crate::output::OutputFormatter;
 use crate::output::influxdb::InfluxDbFormatter;
 use crate::scanner::{Backend, MeasurementResult, ScanError};
 use crate::throttle::Throttle;
 use clap::Parser;
+use std::collections::HashSet;
 use std::future::Future;
 use std::io;
 use std::io::Write;
@@ -82,6 +84,26 @@ impl Scanner for RealScanner {
     }
 }
 
+/// Decide whether a V6 frame is redundant given the devices already seen
+/// emitting E1.
+///
+/// Data format 6 exists only for Bluetooth 4 compatibility and is a strict
+/// subset of E1. Once a device has produced an E1 advertisement, its V6 frames
+/// carry no additional data, so they are dropped. E1 frames record the device
+/// in `e1_devices`; V5 is an unrelated lineage and is never suppressed.
+///
+/// Returns `true` if the measurement should be dropped.
+fn is_redundant_v6(e1_devices: &mut HashSet<MacAddress>, measurement: &Measurement) -> bool {
+    match measurement.format {
+        Format::E1 => {
+            e1_devices.insert(measurement.mac);
+            false
+        }
+        Format::V6 => e1_devices.contains(&measurement.mac),
+        Format::V5 => false,
+    }
+}
+
 fn write_measurement(
     formatter: &dyn OutputFormatter,
     measurement: &Measurement,
@@ -108,11 +130,18 @@ pub async fn run_with_io(
     // Create throttle if interval is specified
     let mut throttle = options.throttle.map(Throttle::new);
 
+    // Devices seen emitting E1, whose redundant V6 frames we drop.
+    let mut e1_devices: HashSet<MacAddress> = HashSet::new();
+
     let mut measurements = scanner.start_scan(options.backend, options.verbose).await?;
 
     while let Some(result) = measurements.recv().await {
         match result {
             Ok(measurement) => {
+                if is_redundant_v6(&mut e1_devices, &measurement) {
+                    continue;
+                }
+
                 let should_emit = throttle
                     .as_mut()
                     .is_none_or(|t: &mut Throttle| t.should_emit(measurement.mac));
@@ -181,8 +210,17 @@ mod tests {
     }
 
     fn measurement(mac: MacAddress, timestamp: SystemTime) -> Measurement {
+        measurement_with_format(mac, timestamp, Format::V5)
+    }
+
+    fn measurement_with_format(
+        mac: MacAddress,
+        timestamp: SystemTime,
+        format: Format,
+    ) -> Measurement {
         Measurement {
             mac,
+            format,
             timestamp,
             temperature: Some(25.5),
             humidity: Some(60.0),
@@ -192,7 +230,10 @@ mod tests {
             movement_counter: Some(10),
             measurement_sequence: Some(100),
             acceleration: None,
+            pm1_0: None,
             pm2_5: None,
+            pm4_0: None,
+            pm10_0: None,
             co2: None,
             voc_index: None,
             nox_index: None,
@@ -255,6 +296,73 @@ mod tests {
         let out = String::from_utf8(out).unwrap();
         // only first should pass (no waiting in test, so second is within interval)
         assert_eq!(out.lines().count(), 1);
+    }
+
+    #[test]
+    fn is_redundant_v6_drops_v6_only_after_e1_seen_for_same_device() {
+        let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        let other = MacAddress([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        let ts = SystemTime::UNIX_EPOCH;
+        let mut e1_devices = HashSet::new();
+
+        // V6 before any E1 is kept.
+        assert!(!is_redundant_v6(
+            &mut e1_devices,
+            &measurement_with_format(mac, ts, Format::V6)
+        ));
+
+        // E1 is always kept and registers the device.
+        assert!(!is_redundant_v6(
+            &mut e1_devices,
+            &measurement_with_format(mac, ts, Format::E1)
+        ));
+
+        // V6 from that device is now redundant.
+        assert!(is_redundant_v6(
+            &mut e1_devices,
+            &measurement_with_format(mac, ts, Format::V6)
+        ));
+
+        // V6 from a different device is unaffected.
+        assert!(!is_redundant_v6(
+            &mut e1_devices,
+            &measurement_with_format(other, ts, Format::V6)
+        ));
+
+        // V5 is never suppressed.
+        assert!(!is_redundant_v6(
+            &mut e1_devices,
+            &measurement_with_format(mac, ts, Format::V5)
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_drops_v6_after_e1_from_same_device() {
+        let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        let ts = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+
+        // Order: V6 (kept), E1 (kept), V6 (dropped).
+        let scanner = FakeScanner::new(vec![
+            Ok(measurement_with_format(mac, ts, Format::V6)),
+            Ok(measurement_with_format(mac, ts, Format::E1)),
+            Ok(measurement_with_format(mac, ts, Format::V6)),
+        ]);
+        let options = Options {
+            influxdb_measurement: "ruuvi_measurement".to_string(),
+            aliases: vec![],
+            verbose: false,
+            throttle: None,
+            backend: Backend::Bluer,
+        };
+
+        let mut out = Vec::<u8>::new();
+        let mut err = Vec::<u8>::new();
+        run_with_io(options, &scanner, &mut out, &mut err)
+            .await
+            .unwrap();
+
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(out.lines().count(), 2);
     }
 
     #[tokio::test]
