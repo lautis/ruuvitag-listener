@@ -152,7 +152,10 @@ impl InfluxDbFormatter {
             "measurement_sequence_number",
             m.measurement_sequence.map(f64::from)
         );
+        write_field!("pm1_0", m.pm1_0);
         write_field!("pm2_5", m.pm2_5);
+        write_field!("pm4_0", m.pm4_0);
+        write_field!("pm10_0", m.pm10_0);
         write_field!("co2", m.co2);
         write_field!("voc_index", m.voc_index);
         write_field!("nox_index", m.nox_index);

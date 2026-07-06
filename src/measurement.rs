@@ -37,8 +37,14 @@ pub struct Measurement {
     pub measurement_sequence: Option<u32>,
     /// Acceleration vector (x, y, z) in g
     pub acceleration: Option<(f64, f64, f64)>,
+    /// Particulate matter (PM1.0) concentration in ug/m3
+    pub pm1_0: Option<f64>,
     /// Particulate matter (PM2.5) concentration in ug/m3
     pub pm2_5: Option<f64>,
+    /// Particulate matter (PM4.0) concentration in ug/m3
+    pub pm4_0: Option<f64>,
+    /// Particulate matter (PM10.0) concentration in ug/m3
+    pub pm10_0: Option<f64>,
     /// Carbon dioxide concentration in ppm
     pub co2: Option<f64>,
     /// Volatile organic compound index

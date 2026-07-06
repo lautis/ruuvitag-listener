@@ -11,7 +11,7 @@ pub mod hci;
 
 use crate::mac_address::MacAddress;
 use crate::measurement::Measurement;
-use ruuvi_decoders::{v5, v6};
+use ruuvi_decoders::{e1, v5, v6};
 use std::time::SystemTime;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -142,8 +142,9 @@ pub fn decode_ruuvi_data(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
     match data[0] {
         5 => decode_v5_measurement(mac, data),
         6 => decode_v6_measurement(mac, data),
+        0xE1 => decode_e1_measurement(mac, data),
         _ => Err(DecodeError::UnsupportedFormat(format!(
-            "RuuviTag data format {} (only V5 and V6 supported)",
+            "RuuviTag data format {} (only V5, V6 and E1 supported)",
             data[0]
         ))),
     }
@@ -174,7 +175,10 @@ fn decode_v5_measurement(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
                 movement_counter: tag.movement_counter.map(u32::from),
                 measurement_sequence: tag.measurement_sequence.map(u32::from),
                 acceleration,
+                pm1_0: None,
                 pm2_5: None,
+                pm4_0: None,
+                pm10_0: None,
                 co2: None,
                 voc_index: None,
                 nox_index: None,
@@ -201,7 +205,39 @@ fn decode_v6_measurement(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
             movement_counter: None,
             measurement_sequence: tag.measurement_sequence.map(u32::from),
             acceleration: None,
+            pm1_0: None,
             pm2_5: tag.pm2_5,
+            pm4_0: None,
+            pm10_0: None,
+            co2: tag.co2.map(f64::from),
+            voc_index: tag.voc_index.map(f64::from),
+            nox_index: tag.nox_index.map(f64::from),
+            luminosity: tag.luminosity,
+        }),
+        Err(e) => Err(DecodeError::DecoderError(format!(
+            "Failed to decode RuuviTag data: {e:?}"
+        ))),
+    }
+}
+
+fn decode_e1_measurement(mac: MacAddress, data: &[u8]) -> Result<Measurement, DecodeError> {
+    match e1::decode(data) {
+        Ok(tag) => Ok(Measurement {
+            mac,
+            timestamp: SystemTime::now(),
+            temperature: tag.temperature,
+            humidity: tag.humidity,
+            // Decoder returns hPa; store as Pa to stay consistent with v5/v6 handling.
+            pressure: tag.pressure.map(|hpa| hpa * 100.0),
+            battery: None,
+            tx_power: None,
+            movement_counter: None,
+            measurement_sequence: tag.measurement_sequence,
+            acceleration: None,
+            pm1_0: tag.pm1_0,
+            pm2_5: tag.pm2_5,
+            pm4_0: tag.pm4_0,
+            pm10_0: tag.pm10_0,
             co2: tag.co2.map(f64::from),
             voc_index: tag.voc_index.map(f64::from),
             nox_index: tag.nox_index.map(f64::from),
@@ -289,6 +325,37 @@ mod tests {
         assert!(measurement.voc_index.is_none());
         assert!(measurement.nox_index.is_none());
         assert!(measurement.luminosity.is_none());
+    }
+
+    fn e1_payload() -> Vec<u8> {
+        // Known-good E1 (Ruuvi Air) payload from the ruuvi-decoders test suite,
+        // without the 9904 manufacturer prefix. 40 bytes (34 data + 6 MAC).
+        vec![
+            0xE1, 0x17, 0x0C, 0x56, 0x68, 0xC7, 0x9E, 0x00, 0x65, 0x00, 0x70, 0x04, 0xBD, 0x11,
+            0xCA, 0x00, 0xC9, 0x0A, 0x02, 0x13, 0xE0, 0xAC, 0x00, 0x00, 0x00, 0xDE, 0xCD, 0xEE,
+            0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0xCB, 0xB8, 0x33, 0x4C, 0x88, 0x4F,
+        ]
+    }
+
+    #[test]
+    fn test_decode_ruuvi_data_e1() {
+        let measurement = decode_ruuvi_data(TEST_MAC, &e1_payload()).unwrap();
+        assert_eq!(measurement.mac, TEST_MAC);
+        assert!(measurement.temperature.is_some());
+        assert!(measurement.humidity.is_some());
+        assert!(measurement.pressure.is_some());
+        // E1 carries the full particulate-matter range that V6 lacks.
+        assert!(measurement.pm1_0.is_some());
+        assert!(measurement.pm2_5.is_some());
+        assert!(measurement.pm4_0.is_some());
+        assert!(measurement.pm10_0.is_some());
+        assert!(measurement.co2.is_some());
+        assert!(measurement.voc_index.is_some());
+        assert!(measurement.nox_index.is_some());
+        assert!(measurement.measurement_sequence.is_some());
+        // Fields not present in E1 advertisements.
+        assert!(measurement.battery.is_none());
+        assert!(measurement.acceleration.is_none());
     }
 
     #[test]
