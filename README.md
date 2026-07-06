@@ -1,8 +1,8 @@
 # RuuviTag Listener
 
-A command-line client to listen to [RuuviTag](https://ruuvi.com) sensor measurements over Bluetooth LE and output as [InfluxDB line protocol](https://docs.influxdata.com/influxdb/v1.7/write_protocols/line_protocol_reference/).
+A command-line client to listen to [RuuviTag](https://ruuvi.com/ruuvitag/) and [Ruuvi Air](https://ruuvi.com/air/) sensor measurements over Bluetooth LE and output as [InfluxDB line protocol](https://docs.influxdata.com/influxdb/v1.7/write_protocols/line_protocol_reference/).
 
-The listener understands RuuviTag data formats 5 and 6.
+The listener understands RuuviTag data formats 5 (RAWv2), 6 (compact BLE 4 compatible), and E1 (Ruuvi Air). Once a device has been seen emitting E1, its V6 frames are dropped as redundant since V6 is a strict subset of E1.
 
 The output can be used in e.g. [Telegraf Execd Input](https://github.com/influxdata/telegraf/tree/master/plugins/inputs/execd). For an example setup, check out [examples/telegraf](./examples/telegraf/README.md).
 
@@ -90,10 +90,10 @@ Running `ruuvitag-listener` will output measurements to STDOUT until interrupted
 Example output:
 
 ```
-ruuvi_measurement,name=F7:2A:60:0D:6E:1E acceleration_x=-0.055,acceleration_y=-0.032,acceleration_z=0.998,battery_potential=3.007,humidity=19.5,pressure=101.481,temperature=19.63 1546681652675044272
-ruuvi_measurement,name=F1:FC:AA:80:4E:59 acceleration_x=0.005,acceleration_y=0.015,acceleration_z=1.036,battery_potential=2.989,humidity=17.5,pressure=101.536,temperature=21.97 1546681653451240083
-ruuvi_measurement,name=F1:FC:AA:80:4E:59 acceleration_x=0.002,acceleration_y=0.017,acceleration_z=1.032,battery_potential=2.977,humidity=17.5,pressure=101.536,temperature=21.97 1546681654458923308
-ruuvi_measurement,name=F7:2A:60:0D:6E:1E acceleration_x=-0.052,acceleration_y=-0.032,acceleration_z=1,battery_potential=3.013,humidity=19.5,pressure=101.481,temperature=19.63 1546681655691300729
+ruuvi_measurement,mac=F7:2A:60:0D:6E:1E,name=F7:2A:60:0D:6E:1E acceleration_x=-0.055,acceleration_y=-0.032,acceleration_z=0.998,battery_potential=3.007,humidity=19.5,pressure=101.481,temperature=19.63 1546681652675044272
+ruuvi_measurement,mac=F1:FC:AA:80:4E:59,name=F1:FC:AA:80:4E:59 acceleration_x=0.005,acceleration_y=0.015,acceleration_z=1.036,battery_potential=2.989,humidity=17.5,pressure=101.536,temperature=21.97 1546681653451240083
+ruuvi_measurement,mac=F1:FC:AA:80:4E:59,name=F1:FC:AA:80:4E:59 pm1_0=5.5,pm2_5=12.5,pm4_0=8.2,pm10_0=15.1,co2=420,voc_index=123,nox_index=45,luminosity=10,temperature=21.97 1546681654458923308
+ruuvi_measurement,mac=F7:2A:60:0D:6E:1E,name=F7:2A:60:0D:6E:1E acceleration_x=-0.052,acceleration_y=-0.032,acceleration_z=1,battery_potential=3.013,humidity=19.5,pressure=101.481,temperature=19.63 1546681655691300729
 ```
 
 You can also define the InfluxDB measurement name or aliases using command line arguments. For example
@@ -103,8 +103,8 @@ ruuvitag-listener --influxdb-measurement=ruuvi --alias F1:FC:AA:80:4E:59=Indoor 
 ```
 
 ```
-ruuvi,name=Indoor acceleration_x=0,acceleration_y=0.017,acceleration_z=1.027,battery_potential=2.989,humidity=17.5,pressure=101.54,temperature=21.97 1546681957964524841
-ruuvi,name=Outdoor acceleration_x=-0.054,acceleration_y=-0.032,acceleration_z=1.005,battery_potential=3.013,humidity=83.5,pressure=101.487,temperature=-5.63 1546681958085455294
+ruuvi,mac=F1:FC:AA:80:4E:59,name=Indoor acceleration_x=0,acceleration_y=0.017,acceleration_z=1.027,battery_potential=2.989,humidity=17.5,pressure=101.54,temperature=21.97 1546681957964524841
+ruuvi,mac=F7:2A:60:0D:6E:1E,name=Outdoor acceleration_x=-0.054,acceleration_y=-0.032,acceleration_z=1.005,battery_potential=3.013,humidity=83.5,pressure=101.487,temperature=-5.63 1546681958085455294
 ```
 
 All options can be listed with `ruuvitag-listener --help`.
