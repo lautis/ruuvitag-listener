@@ -8,7 +8,7 @@ use super::{
     ScanError, decode_ruuvi_data,
 };
 use crate::mac_address::MacAddress;
-use bluer::{Adapter, Address, AdapterEvent, DiscoveryFilter, DiscoveryTransport, Session};
+use bluer::{Adapter, AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport, Session};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 

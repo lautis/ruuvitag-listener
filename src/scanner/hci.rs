@@ -504,8 +504,7 @@ fn send_hci_command(fd: &OwnedFd, packet: &[u8]) -> Result<(), ScanError> {
 /// events until the one for our command arrives (or we time out). Unrelated
 /// Command Complete events from other openers of the controller are skipped.
 fn read_command_complete(fd: &OwnedFd, expected_opcode: u16) -> Result<Vec<u8>, ScanError> {
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_millis(COMMAND_TIMEOUT_MS);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(COMMAND_TIMEOUT_MS);
     let mut buf = [0u8; 258];
 
     loop {
@@ -535,13 +534,7 @@ fn read_command_complete(fd: &OwnedFd, expected_opcode: u16) -> Result<Vec<u8>, 
             ));
         }
 
-        let n = unsafe {
-            libc::read(
-                fd.as_raw_fd(),
-                buf.as_mut_ptr() as *mut c_void,
-                buf.len(),
-            )
-        };
+        let n = unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr() as *mut c_void, buf.len()) };
         if n < 0 {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::WouldBlock || err.kind() == io::ErrorKind::Interrupted {
@@ -580,9 +573,9 @@ fn send_hci_command_checked(
     let event = read_command_complete(fd, opcode)?;
 
     // Status is the first return parameter, at byte 6.
-    let status = *event.get(6).ok_or_else(|| {
-        ScanError::Bluetooth("Truncated HCI Command Complete event".to_string())
-    })?;
+    let status = *event
+        .get(6)
+        .ok_or_else(|| ScanError::Bluetooth("Truncated HCI Command Complete event".to_string()))?;
     if status != 0 {
         return Err(ScanError::Bluetooth(format!(
             "HCI command {opcode:#06x} failed with status {status:#04x}"
@@ -1035,7 +1028,12 @@ mod tests {
         ad.extend_from_slice(&payload);
 
         // HCI header + extended report header + data
-        let mut pkt = vec![HCI_EVENT_PKT, EVT_LE_META_EVENT, 0x00, EVT_LE_EXTENDED_ADVERTISING_REPORT];
+        let mut pkt = vec![
+            HCI_EVENT_PKT,
+            EVT_LE_META_EVENT,
+            0x00,
+            EVT_LE_EXTENDED_ADVERTISING_REPORT,
+        ];
         pkt.push(0x01); // num_reports
         pkt.extend_from_slice(&[0x00, 0x00]); // event_type
         pkt.push(0x00); // address_type
