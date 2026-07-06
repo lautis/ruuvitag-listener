@@ -1,5 +1,5 @@
 use crate::mac_address::MacAddress;
-use crate::measurement::Measurement;
+use crate::measurement::{Format, Measurement};
 use std::time::SystemTime;
 
 /// A stable MAC address for unit tests.
@@ -11,6 +11,7 @@ pub const TEST_MAC: MacAddress = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]
 pub fn base_measurement(mac: MacAddress, timestamp: SystemTime) -> Measurement {
     Measurement {
         mac,
+        format: Format::V5,
         timestamp,
         temperature: None,
         humidity: None,

@@ -10,7 +10,7 @@ pub mod bluer;
 pub mod hci;
 
 use crate::mac_address::MacAddress;
-use crate::measurement::Measurement;
+use crate::measurement::{Format, Measurement};
 use ruuvi_decoders::{e1, v5, v6};
 use std::time::SystemTime;
 use thiserror::Error;
@@ -166,6 +166,7 @@ fn decode_v5_measurement(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
 
             Ok(Measurement {
                 mac,
+                format: Format::V5,
                 timestamp: SystemTime::now(),
                 temperature: tag.temperature,
                 humidity: tag.humidity,
@@ -195,6 +196,7 @@ fn decode_v6_measurement(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
     match v6::decode(data) {
         Ok(tag) => Ok(Measurement {
             mac,
+            format: Format::V6,
             timestamp: SystemTime::now(),
             temperature: tag.temperature,
             humidity: tag.humidity,
@@ -224,6 +226,7 @@ fn decode_e1_measurement(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
     match e1::decode(data) {
         Ok(tag) => Ok(Measurement {
             mac,
+            format: Format::E1,
             timestamp: SystemTime::now(),
             temperature: tag.temperature,
             humidity: tag.humidity,
