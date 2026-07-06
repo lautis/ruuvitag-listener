@@ -812,9 +812,9 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "ruuvi-decoders"
-version = "1.0.0"
+version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2c35276393289d712184d254a503a85094d9fe927eb928e67d927024cd0bb59"
+checksum = "baf9fb7ccd43e095cd5686ca9b022b38795291c7375cc904b33f6bda1f38e104"
 dependencies = [
  "hex",
  "serde",

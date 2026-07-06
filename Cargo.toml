@@ -16,7 +16,7 @@ hci = ["dep:libc", "tokio/net"]
 [dependencies]
 bluer = { version = "0.17", features = ["bluetoothd"], optional = true }
 libc = { version = "0.2", optional = true }
-ruuvi-decoders = "1.0"
+ruuvi-decoders = "2.0"
 tokio = { version = "1", features = ["rt", "macros", "sync"] }
 futures = { version = "0.3", optional = true }
 clap = { version = "4", features = ["derive"] }
