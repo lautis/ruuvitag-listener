@@ -51,6 +51,16 @@ sudo hciconfig hci0 up
 ruuvitag-listener --backend hci
 ```
 
+### Adapter selection
+
+By default, the BlueZ backend uses the system default adapter and the HCI backend uses `hci0`. To scan with a specific adapter, pass its kernel name with `--adapter`:
+
+```sh
+ruuvitag-listener --adapter hci1
+```
+
+Selecting an adapter that does not exist fails at startup with the list of available adapters.
+
 ### Building with a single backend
 
 By default, all backends are compiled. To build with only the e.g. HCI backend (smaller binary, no D-Bus dependency):

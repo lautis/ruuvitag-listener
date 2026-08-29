@@ -26,12 +26,25 @@ impl From<bluer::Error> for ScanError {
 ///
 /// # Arguments
 /// * `verbose` - If true, decode errors are sent as Err values; otherwise they're silently dropped.
+/// * `adapter_name` - Kernel adapter name (e.g. "hci0"), or `None` for BlueZ's default adapter.
 ///
 /// # Returns
 /// A receiver for measurements (or decode errors if verbose).
-pub async fn start_scan(verbose: bool) -> Result<mpsc::Receiver<MeasurementResult>, ScanError> {
+pub async fn start_scan(
+    verbose: bool,
+    adapter_name: Option<String>,
+) -> Result<mpsc::Receiver<MeasurementResult>, ScanError> {
     let session = Session::new().await?;
-    let adapter = session.default_adapter().await?;
+    let adapter = match adapter_name {
+        Some(name) => {
+            let names = session.adapter_names().await?;
+            if !names.iter().any(|candidate| candidate == &name) {
+                return Err(ScanError::adapter_not_found(&name, Some(&names)));
+            }
+            session.adapter(&name)?
+        }
+        None => session.default_adapter().await?,
+    };
     adapter.set_powered(true).await?;
 
     // Enable `duplicate_data` so BlueZ emits a PropertiesChanged signal for

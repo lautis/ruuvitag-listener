@@ -64,6 +64,7 @@ impl Scanner for FakeScanner {
         &self,
         _backend: Backend,
         _verbose: bool,
+        _adapter: Option<String>,
     ) -> Pin<
         Box<dyn Future<Output = Result<mpsc::Receiver<MeasurementResult>, ScanError>> + Send + '_>,
     > {
@@ -87,6 +88,7 @@ fn default_options() -> Options {
         verbose: false,
         throttle: None,
         backend: Backend::Bluer,
+        adapter: None,
     }
 }
 

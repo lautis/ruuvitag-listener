@@ -46,6 +46,10 @@ pub struct Options {
     /// Bluetooth scanner backend to use
     #[arg(long, default_value_t, value_enum)]
     pub backend: Backend,
+
+    /// Bluetooth adapter to use, e.g. hci0
+    #[arg(long, value_name = "ADAPTER")]
+    pub adapter: Option<String>,
 }
 
 /// Errors returned by the core run loop.
@@ -63,6 +67,7 @@ pub trait Scanner: Send + Sync {
         &self,
         backend: Backend,
         verbose: bool,
+        adapter: Option<String>,
     ) -> Pin<
         Box<dyn Future<Output = Result<mpsc::Receiver<MeasurementResult>, ScanError>> + Send + '_>,
     >;
@@ -77,10 +82,11 @@ impl Scanner for RealScanner {
         &self,
         backend: Backend,
         verbose: bool,
+        adapter: Option<String>,
     ) -> Pin<
         Box<dyn Future<Output = Result<mpsc::Receiver<MeasurementResult>, ScanError>> + Send + '_>,
     > {
-        Box::pin(async move { crate::scanner::start_scan(backend, verbose).await })
+        Box::pin(async move { crate::scanner::start_scan(backend, verbose, adapter).await })
     }
 }
 
@@ -134,7 +140,9 @@ pub async fn run_with_io(
     // Devices seen emitting E1, whose redundant V6 frames we drop.
     let mut e1_devices: HashSet<MacAddress> = HashSet::new();
 
-    let mut measurements = scanner.start_scan(options.backend, options.verbose).await?;
+    let mut measurements = scanner
+        .start_scan(options.backend, options.verbose, options.adapter)
+        .await?;
 
     while let Some(result) = measurements.recv().await {
         match result {
@@ -189,6 +197,7 @@ mod tests {
             &self,
             _backend: Backend,
             _verbose: bool,
+            _adapter: Option<String>,
         ) -> Pin<
             Box<
                 dyn Future<Output = Result<mpsc::Receiver<MeasurementResult>, ScanError>>
@@ -255,6 +264,7 @@ mod tests {
             verbose: false,
             throttle: None,
             backend: Backend::Bluer,
+            adapter: None,
         };
 
         let mut out = Vec::<u8>::new();
@@ -286,6 +296,7 @@ mod tests {
             verbose: false,
             throttle: Some(Duration::from_secs(3600)),
             backend: Backend::Bluer,
+            adapter: None,
         };
 
         let mut out = Vec::<u8>::new();
@@ -354,6 +365,7 @@ mod tests {
             verbose: false,
             throttle: None,
             backend: Backend::Bluer,
+            adapter: None,
         };
 
         let mut out = Vec::<u8>::new();
@@ -378,6 +390,7 @@ mod tests {
             verbose: false,
             throttle: None,
             backend: Backend::Bluer,
+            adapter: None,
         };
 
         // non-verbose: nothing written

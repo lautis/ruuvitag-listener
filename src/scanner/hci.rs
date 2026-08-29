@@ -16,6 +16,7 @@ use libc::{
 use std::io;
 use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::path::Path;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 
@@ -233,6 +234,58 @@ fn bind_hci_socket(fd: &OwnedFd, dev_id: u16) -> Result<(), ScanError> {
     }
 
     Ok(())
+}
+
+/// Sysfs directory where the kernel exposes registered HCI controllers.
+const HCI_SYSFS_CLASS: &str = "/sys/class/bluetooth";
+
+/// Parse an adapter name such as "hci1" (or a bare index "1") into a device id.
+///
+/// The kernel names controllers strictly "hci<dev_id>", so the id can be
+/// derived from the name without querying the kernel.
+fn parse_adapter_name(name: &str) -> Option<u16> {
+    name.strip_prefix("hci").unwrap_or(name).parse().ok()
+}
+
+/// List adapter names (e.g. "hci0") currently registered with the kernel.
+///
+/// Returns `None` when sysfs is unavailable; callers then proceed without
+/// validation and any real problem surfaces at `bind`.
+fn list_adapters() -> Option<Vec<String>> {
+    list_adapters_in(Path::new(HCI_SYSFS_CLASS)).ok()
+}
+
+/// List adapter names found in a sysfs Bluetooth class directory, sorted by device id.
+fn list_adapters_in(dir: &Path) -> io::Result<Vec<String>> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| parse_adapter_name(name).is_some())
+        .collect();
+    names.sort_by_key(|name| parse_adapter_name(name).unwrap_or(u16::MAX));
+    Ok(names)
+}
+
+/// Resolve a user-supplied adapter name to an HCI device id.
+///
+/// The sysfs listing is only consulted to validate the name and produce a
+/// helpful error; when sysfs is unavailable the parsed device id is used
+/// as-is.
+fn resolve_adapter(name: &str) -> Result<u16, ScanError> {
+    let dev_id = parse_adapter_name(name).ok_or_else(|| {
+        ScanError::Bluetooth(format!(
+            "Invalid Bluetooth adapter '{}': expected a name like hci0",
+            name
+        ))
+    })?;
+    let available = list_adapters();
+    if let Some(available) = available.as_deref() {
+        let canonical = format!("hci{}", dev_id);
+        if !available.iter().any(|candidate| candidate == &canonical) {
+            return Err(ScanError::adapter_not_found(name, Some(available)));
+        }
+    }
+    Ok(dev_id)
 }
 
 /// Set HCI socket filter for kernel-level packet filtering.
@@ -869,6 +922,7 @@ fn parse_ruuvi_from_ad_data(ad_data: &[u8], addr: [u8; 6]) -> Option<Measurement
 ///
 /// # Arguments
 /// * `verbose` - If true, decode errors are sent as Err values; otherwise they're silently dropped.
+/// * `adapter` - Kernel adapter name (e.g. "hci1"), or `None` for `hci0`.
 ///
 /// # Returns
 /// A receiver for measurements (or decode errors if verbose).
@@ -876,10 +930,18 @@ fn parse_ruuvi_from_ad_data(ad_data: &[u8], addr: [u8; 6]) -> Option<Measurement
 /// # Requirements
 /// - CAP_NET_RAW and CAP_NET_ADMIN capabilities or root privileges
 /// - An available HCI device (typically hci0)
-pub async fn start_scan(verbose: bool) -> Result<mpsc::Receiver<MeasurementResult>, ScanError> {
+pub async fn start_scan(
+    verbose: bool,
+    adapter: Option<String>,
+) -> Result<mpsc::Receiver<MeasurementResult>, ScanError> {
+    let dev_id = match adapter {
+        Some(name) => resolve_adapter(&name)?,
+        None => 0, // default to hci0, as before
+    };
+
     // Open and configure HCI socket for receiving events
     let fd = open_hci_socket()?;
-    bind_hci_socket(&fd, 0)?; // Bind to hci0 to receive advertising events
+    bind_hci_socket(&fd, dev_id)?;
     set_hci_filter(&fd)?;
     set_bpf_ruuvi_filter(&fd)?; // Kernel-level filtering for Ruuvi packets
 
@@ -887,7 +949,7 @@ pub async fn start_scan(verbose: bool) -> Result<mpsc::Receiver<MeasurementResul
     // It needs a filter that lets Command Complete events through so we can read
     // back command results and detect Bluetooth 5 extended-advertising support.
     let cmd_fd = open_hci_socket()?;
-    bind_hci_socket(&cmd_fd, 0)?; // Bind to hci0
+    bind_hci_socket(&cmd_fd, dev_id)?;
     set_command_hci_filter(&cmd_fd)?;
     configure_le_scan(&cmd_fd)?;
 
@@ -1054,5 +1116,41 @@ mod tests {
             measurement.mac,
             MacAddress([0x06, 0x05, 0x04, 0x03, 0x02, 0x01])
         );
+    }
+
+    #[test]
+    fn test_parse_adapter_name() {
+        assert_eq!(parse_adapter_name("hci0"), Some(0));
+        assert_eq!(parse_adapter_name("hci1"), Some(1));
+        assert_eq!(parse_adapter_name("1"), Some(1));
+        assert_eq!(parse_adapter_name("hci"), None);
+        assert_eq!(parse_adapter_name("hciX"), None);
+        assert_eq!(parse_adapter_name(""), None);
+        assert_eq!(parse_adapter_name("hci99999"), None);
+    }
+
+    #[test]
+    fn test_resolve_adapter_rejects_invalid_name() {
+        match resolve_adapter("not-an-adapter") {
+            Err(ScanError::Bluetooth(message)) => {
+                assert!(message.contains("not-an-adapter"));
+                assert!(message.contains("expected a name like hci0"));
+            }
+            other => panic!("expected Bluetooth error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_list_adapters_in_sorts_by_device_id() {
+        let dir = std::env::temp_dir().join(format!("ruuvitag-hci-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("hci10")).unwrap();
+        std::fs::create_dir_all(dir.join("hci2")).unwrap();
+        std::fs::create_dir_all(dir.join("not-hci")).unwrap();
+
+        let adapters = list_adapters_in(&dir).unwrap();
+        assert_eq!(adapters, vec!["hci2".to_string(), "hci10".to_string()]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

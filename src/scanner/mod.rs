@@ -52,6 +52,21 @@ pub enum ScanError {
     BackendNotAvailable(String),
 }
 
+impl ScanError {
+    /// Build an error for a requested Bluetooth adapter that does not exist.
+    ///
+    /// `available` is the list of adapter names reported to the user; pass
+    /// `None` when the available adapters could not be enumerated.
+    pub(crate) fn adapter_not_found(name: &str, available: Option<&[String]>) -> Self {
+        let mut message = format!("Bluetooth adapter '{}' not found", name);
+        if let Some(available) = available.filter(|available| !available.is_empty()) {
+            message.push_str("; available adapters: ");
+            message.push_str(&available.join(", "));
+        }
+        ScanError::Bluetooth(message)
+    }
+}
+
 /// Ruuvi Innovations manufacturer ID (little-endian bytes for pattern matching).
 ///
 /// Bluetooth LE advertisements use little-endian byte order for manufacturer IDs.
@@ -220,18 +235,20 @@ pub fn decode_ruuvi_data(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
 /// # Arguments
 /// * `backend` - The scanner backend to use
 /// * `verbose` - If true, decode errors are sent as Err values; otherwise they're silently dropped.
+/// * `adapter` - Bluetooth adapter name (e.g. "hci0"), or `None` for the backend default.
 ///
 /// # Returns
 /// A receiver for measurements (or decode errors if verbose).
 pub async fn start_scan(
     backend: Backend,
     verbose: bool,
+    adapter: Option<String>,
 ) -> Result<mpsc::Receiver<MeasurementResult>, ScanError> {
     match backend {
         #[cfg(feature = "bluer")]
-        Backend::Bluer => bluer::start_scan(verbose).await,
+        Backend::Bluer => bluer::start_scan(verbose, adapter).await,
         #[cfg(feature = "hci")]
-        Backend::Hci => hci::start_scan(verbose).await,
+        Backend::Hci => hci::start_scan(verbose, adapter).await,
     }
 }
 
