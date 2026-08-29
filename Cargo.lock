@@ -518,9 +518,6 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "ident_case"
@@ -811,14 +808,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
-name = "ruuvi-decoders"
-version = "2.0.2"
+name = "ruuvi-sensor-protocol"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baf9fb7ccd43e095cd5686ca9b022b38795291c7375cc904b33f6bda1f38e104"
+checksum = "52d03a6889989c8d2d19549f98bf2739862b5a5eaed7d0d47b2c800682e93503"
 dependencies = [
- "hex",
- "serde",
- "thiserror",
+ "serde_json",
 ]
 
 [[package]]
@@ -830,7 +825,7 @@ dependencies = [
  "criterion",
  "futures",
  "libc",
- "ruuvi-decoders",
+ "ruuvi-sensor-protocol",
  "thiserror",
  "tokio",
  "tokio-test",

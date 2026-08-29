@@ -11,7 +11,11 @@ pub mod hci;
 
 use crate::mac_address::MacAddress;
 use crate::measurement::{Format, Measurement};
-use ruuvi_decoders::{e1, v5, v6};
+use ruuvi_sensor_protocol::{
+    Acceleration, AccelerationVector, BatteryPotential, CarbonDioxide, Humidity, Luminosity,
+    MeasurementSequenceNumber, MovementCounter, NitrogenOxides, ParticulateMatter, Pressure,
+    SensorValues, Temperature, TransmitterPower, VolatileOrganicCompounds,
+};
 use std::time::SystemTime;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -122,7 +126,7 @@ impl std::str::FromStr for Backend {
 /// Decode manufacturer data from a RuuviTag into a Measurement.
 ///
 /// This function converts raw manufacturer data bytes into a structured `Measurement`
-/// with all values in standard SI units. Supports RuuviTag V5 and V6 formats.
+/// with all values in standard SI units. Supports RuuviTag data formats V5, V6 and E1.
 ///
 /// # Arguments
 /// * `mac` - The MAC address of the device
@@ -132,124 +136,79 @@ impl std::str::FromStr for Backend {
 /// A Result containing the decoded Measurement or a DecodeError.
 ///
 /// # Unit Conversions
+/// - Temperature: milli-celsius → Celsius (divide by 1000)
+/// - Humidity: parts per million → percent (divide by 10000)
 /// - Battery voltage: millivolts → Volts (divide by 1000)
 /// - Acceleration: milli-g → g (divide by 1000)
+/// - Particulate matter: nanograms per cubic meter → micrograms per cubic meter (divide by 1000)
+/// - Luminosity: millilux → lux (divide by 1000)
 pub fn decode_ruuvi_data(mac: MacAddress, data: &[u8]) -> Result<Measurement, DecodeError> {
     if data.is_empty() {
         return Err(DecodeError::InvalidData("Empty data".into()));
     }
 
-    match data[0] {
-        5 => decode_v5_measurement(mac, data),
-        6 => decode_v6_measurement(mac, data),
-        0xE1 => decode_e1_measurement(mac, data),
-        _ => Err(DecodeError::UnsupportedFormat(format!(
-            "RuuviTag data format {} (only V5, V6 and E1 supported)",
-            data[0]
-        ))),
-    }
-}
+    let format = match data[0] {
+        5 => Format::V5,
+        6 => Format::V6,
+        0xE1 => Format::E1,
+        other => {
+            return Err(DecodeError::UnsupportedFormat(format!(
+                "RuuviTag data format {other} (only V5, V6 and E1 supported)"
+            )));
+        }
+    };
 
-fn decode_v5_measurement(mac: MacAddress, data: &[u8]) -> Result<Measurement, DecodeError> {
-    match v5::decode(data) {
-        Ok(tag) => {
-            let battery_potential = tag.battery_voltage.map(|v| f64::from(v) / 1000.0);
+    let values = SensorValues::from_manufacturer_specific_data(RUUVI_MANUFACTURER_ID, data)
+        .map_err(|e| DecodeError::DecoderError(e.to_string()))?;
 
-            let acceleration = match (tag.acceleration_x, tag.acceleration_y, tag.acceleration_z) {
-                (Some(x), Some(y), Some(z)) => Some((
+    let acceleration =
+        values
+            .acceleration_vector_as_milli_g()
+            .map(|AccelerationVector(x, y, z)| {
+                (
                     f64::from(x) / 1000.0,
                     f64::from(y) / 1000.0,
                     f64::from(z) / 1000.0,
-                )),
-                _ => None,
-            };
+                )
+            });
 
-            Ok(Measurement {
-                mac,
-                format: Format::V5,
-                timestamp: SystemTime::now(),
-                temperature: tag.temperature,
-                humidity: tag.humidity,
-                pressure: tag.pressure,
-                battery: battery_potential,
-                tx_power: tag.tx_power,
-                movement_counter: tag.movement_counter.map(u32::from),
-                measurement_sequence: tag.measurement_sequence.map(u32::from),
-                acceleration,
-                pm1_0: None,
-                pm2_5: None,
-                pm4_0: None,
-                pm10_0: None,
-                co2: None,
-                voc_index: None,
-                nox_index: None,
-                luminosity: None,
-            })
-        }
-        Err(e) => Err(DecodeError::DecoderError(format!(
-            "Failed to decode RuuviTag data: {e:?}"
-        ))),
-    }
-}
-
-fn decode_v6_measurement(mac: MacAddress, data: &[u8]) -> Result<Measurement, DecodeError> {
-    match v6::decode(data) {
-        Ok(tag) => Ok(Measurement {
-            mac,
-            format: Format::V6,
-            timestamp: SystemTime::now(),
-            temperature: tag.temperature,
-            humidity: tag.humidity,
-            // Decoder returns hPa; store as Pa to stay consistent with v5 handling.
-            pressure: tag.pressure.map(|hpa| hpa * 100.0),
-            battery: None,
-            tx_power: None,
-            movement_counter: None,
-            measurement_sequence: tag.measurement_sequence.map(u32::from),
-            acceleration: None,
-            pm1_0: None,
-            pm2_5: tag.pm2_5,
-            pm4_0: None,
-            pm10_0: None,
-            co2: tag.co2.map(f64::from),
-            voc_index: tag.voc_index.map(f64::from),
-            nox_index: tag.nox_index.map(f64::from),
-            luminosity: tag.luminosity,
-        }),
-        Err(e) => Err(DecodeError::DecoderError(format!(
-            "Failed to decode RuuviTag data: {e:?}"
-        ))),
-    }
-}
-
-fn decode_e1_measurement(mac: MacAddress, data: &[u8]) -> Result<Measurement, DecodeError> {
-    match e1::decode(data) {
-        Ok(tag) => Ok(Measurement {
-            mac,
-            format: Format::E1,
-            timestamp: SystemTime::now(),
-            temperature: tag.temperature,
-            humidity: tag.humidity,
-            // Decoder returns hPa; store as Pa to stay consistent with v5/v6 handling.
-            pressure: tag.pressure.map(|hpa| hpa * 100.0),
-            battery: None,
-            tx_power: None,
-            movement_counter: None,
-            measurement_sequence: tag.measurement_sequence,
-            acceleration: None,
-            pm1_0: tag.pm1_0,
-            pm2_5: tag.pm2_5,
-            pm4_0: tag.pm4_0,
-            pm10_0: tag.pm10_0,
-            co2: tag.co2.map(f64::from),
-            voc_index: tag.voc_index.map(f64::from),
-            nox_index: tag.nox_index.map(f64::from),
-            luminosity: tag.luminosity,
-        }),
-        Err(e) => Err(DecodeError::DecoderError(format!(
-            "Failed to decode RuuviTag data: {e:?}"
-        ))),
-    }
+    Ok(Measurement {
+        mac,
+        format,
+        timestamp: SystemTime::now(),
+        temperature: values
+            .temperature_as_millicelsius()
+            .map(|milli_celsius| f64::from(milli_celsius) / 1000.0),
+        humidity: values
+            .humidity_as_ppm()
+            .map(|ppm| f64::from(ppm) / 10_000.0),
+        pressure: values.pressure_as_pascals().map(f64::from),
+        battery: values
+            .battery_potential_as_millivolts()
+            .map(|millivolts| f64::from(millivolts) / 1000.0),
+        tx_power: values.tx_power_as_dbm(),
+        movement_counter: values.movement_counter(),
+        measurement_sequence: values.measurement_sequence_number(),
+        acceleration,
+        pm1_0: values
+            .pm1_0_as_nanograms_per_cubic_meter()
+            .map(|ng_m3| f64::from(ng_m3) / 1000.0),
+        pm2_5: values
+            .pm2_5_as_nanograms_per_cubic_meter()
+            .map(|ng_m3| f64::from(ng_m3) / 1000.0),
+        pm4_0: values
+            .pm4_0_as_nanograms_per_cubic_meter()
+            .map(|ng_m3| f64::from(ng_m3) / 1000.0),
+        pm10_0: values
+            .pm10_0_as_nanograms_per_cubic_meter()
+            .map(|ng_m3| f64::from(ng_m3) / 1000.0),
+        co2: values.carbon_dioxide_as_ppm().map(f64::from),
+        voc_index: values.voc_index().map(f64::from),
+        nox_index: values.nox_index().map(f64::from),
+        luminosity: values
+            .luminosity_as_millilux()
+            .map(|millilux| f64::from(millilux) / 1000.0),
+    })
 }
 
 /// Start scanning for RuuviTag devices using the specified backend.
@@ -281,6 +240,15 @@ mod tests {
     use crate::test_utils::TEST_MAC;
     use std::str::FromStr;
 
+    /// Assert that an Option<f64> is present and close to the expected value.
+    fn assert_close(actual: Option<f64>, expected: f64) {
+        let actual = actual.expect("expected a value");
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected {expected}, got {actual}"
+        );
+    }
+
     fn v5_payload() -> Vec<u8> {
         // Example V5 data (without manufacturer ID prefix)
         // This is a valid V5 payload
@@ -311,19 +279,22 @@ mod tests {
     fn test_decode_ruuvi_data_v5() {
         let measurement = decode_ruuvi_data(TEST_MAC, &v5_payload()).unwrap();
         assert_eq!(measurement.mac, TEST_MAC);
+        assert_eq!(measurement.format, Format::V5);
         assert!(measurement.timestamp.elapsed().is_ok()); // Verify timestamp is set
-        assert!(measurement.temperature.is_some());
-        assert!(measurement.humidity.is_some());
-        assert!(measurement.pressure.is_some());
-        assert!(measurement.battery.is_some());
-        assert!(measurement.movement_counter.is_some());
+        // Values as per the Ruuvi data format 5 specification.
+        assert_close(measurement.temperature, 24.3);
+        assert_close(measurement.humidity, 53.49);
+        assert_close(measurement.pressure, 100_044.0);
+        assert_close(measurement.battery, 2.977);
+        assert_eq!(measurement.tx_power, Some(4));
         assert_eq!(measurement.movement_counter, Some(66));
-        assert!(measurement.acceleration.is_some());
+        assert_eq!(measurement.measurement_sequence, Some(205));
         // Acceleration should be converted from mG to g
-        let (x, _y, z) = measurement.acceleration.unwrap();
-        assert!((x - 0.004).abs() < 0.001);
-        assert!((z - 1.036).abs() < 0.001);
+        assert_eq!(measurement.acceleration, Some((0.004, -0.004, 1.036)));
+        assert!(measurement.pm1_0.is_none());
         assert!(measurement.pm2_5.is_none());
+        assert!(measurement.pm4_0.is_none());
+        assert!(measurement.pm10_0.is_none());
         assert!(measurement.co2.is_none());
         assert!(measurement.voc_index.is_none());
         assert!(measurement.nox_index.is_none());
@@ -331,7 +302,7 @@ mod tests {
     }
 
     fn e1_payload() -> Vec<u8> {
-        // Known-good E1 (Ruuvi Air) payload from the ruuvi-decoders test suite,
+        // Known-good E1 (Ruuvi Air) payload,
         // without the 9904 manufacturer prefix. 40 bytes (34 data + 6 MAC).
         vec![
             0xE1, 0x17, 0x0C, 0x56, 0x68, 0xC7, 0x9E, 0x00, 0x65, 0x00, 0x70, 0x04, 0xBD, 0x11,
@@ -344,20 +315,24 @@ mod tests {
     fn test_decode_ruuvi_data_e1() {
         let measurement = decode_ruuvi_data(TEST_MAC, &e1_payload()).unwrap();
         assert_eq!(measurement.mac, TEST_MAC);
-        assert!(measurement.temperature.is_some());
-        assert!(measurement.humidity.is_some());
-        assert!(measurement.pressure.is_some());
+        assert_eq!(measurement.format, Format::E1);
+        assert_close(measurement.temperature, 29.5);
+        assert_close(measurement.humidity, 55.3);
+        assert_close(measurement.pressure, 101_102.0);
         // E1 carries the full particulate-matter range that V6 lacks.
-        assert!(measurement.pm1_0.is_some());
-        assert!(measurement.pm2_5.is_some());
-        assert!(measurement.pm4_0.is_some());
-        assert!(measurement.pm10_0.is_some());
-        assert!(measurement.co2.is_some());
-        assert!(measurement.voc_index.is_some());
-        assert!(measurement.nox_index.is_some());
-        assert!(measurement.measurement_sequence.is_some());
+        assert_close(measurement.pm1_0, 10.1);
+        assert_close(measurement.pm2_5, 11.2);
+        assert_close(measurement.pm4_0, 121.3);
+        assert_close(measurement.pm10_0, 455.4);
+        assert_close(measurement.co2, 201.0);
+        assert_close(measurement.voc_index, 10.0);
+        assert_close(measurement.nox_index, 2.0);
+        assert_close(measurement.luminosity, 13_027.0);
+        assert_eq!(measurement.measurement_sequence, Some(14_601_710));
         // Fields not present in E1 advertisements.
         assert!(measurement.battery.is_none());
+        assert!(measurement.tx_power.is_none());
+        assert!(measurement.movement_counter.is_none());
         assert!(measurement.acceleration.is_none());
     }
 
@@ -371,17 +346,21 @@ mod tests {
     fn test_decode_ruuvi_data_v6() {
         let measurement = decode_ruuvi_data(TEST_MAC, &v6_payload()).unwrap();
         assert_eq!(measurement.mac, TEST_MAC);
-        assert!(measurement.temperature.is_some());
-        assert!(measurement.humidity.is_some());
-        assert!(measurement.pressure.is_some());
-        assert!(measurement.pm2_5.is_some());
-        assert!(measurement.co2.is_some());
-        assert!(measurement.voc_index.is_some());
-        assert!(measurement.nox_index.is_some());
-        assert!(measurement.luminosity.is_some());
+        assert_eq!(measurement.format, Format::V6);
+        assert_close(measurement.temperature, 29.5);
+        assert_close(measurement.humidity, 55.3);
+        assert_close(measurement.pressure, 101_102.0);
+        assert_close(measurement.pm2_5, 11.2);
+        assert_close(measurement.co2, 201.0);
+        assert_close(measurement.voc_index, 5.0);
+        assert_close(measurement.nox_index, 1.0);
+        // Luminosity is a logarithmic lookup (millilux → lux)
+        assert_close(measurement.luminosity, 13_026.67);
+        assert_eq!(measurement.measurement_sequence, Some(205));
+        assert_eq!(measurement.movement_counter, None);
+        assert_eq!(measurement.battery, None);
+        assert_eq!(measurement.tx_power, None);
         assert!(measurement.acceleration.is_none());
-        assert!(measurement.battery.is_none());
-        assert!(measurement.tx_power.is_none());
     }
 
     #[test]
