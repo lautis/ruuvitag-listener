@@ -51,6 +51,10 @@ pub struct Options {
     #[arg(long = "alias", value_parser = crate::alias::parse_alias, value_name = "ALIAS")]
     pub aliases: Vec<Alias>,
 
+    /// Only emit measurements from devices that have an alias defined.
+    #[arg(long)]
+    pub only_aliased: bool,
+
     /// Verbose output, print parse errors for unrecognized data
     #[arg(short = 'v', long = "verbose")]
     pub verbose: bool,
@@ -181,6 +185,11 @@ pub async fn run_with_io(
                     .is_none_or(|t: &mut Throttle| t.should_emit(measurement.mac));
 
                 if should_emit {
+                    let only_aliased = options.only_aliased
+                        && !crate::alias::has_alias(&measurement.mac, &aliases);
+                    if only_aliased {
+                        continue;
+                    }
                     let name = crate::alias::resolve_name(&measurement.mac, &aliases);
                     write_measurement(&*formatter, &measurement, &name, out)?;
                 }
@@ -291,6 +300,7 @@ mod tests {
             throttle: None,
             backend: Backend::Bluer,
             adapter: None,
+            only_aliased: false,
         };
 
         let mut out = Vec::<u8>::new();
@@ -324,6 +334,7 @@ mod tests {
             throttle: Some(Duration::from_secs(3600)),
             backend: Backend::Bluer,
             adapter: None,
+            only_aliased: false,
         };
 
         let mut out = Vec::<u8>::new();
@@ -394,6 +405,7 @@ mod tests {
             throttle: None,
             backend: Backend::Bluer,
             adapter: None,
+            only_aliased: false,
         };
 
         let mut out = Vec::<u8>::new();
@@ -404,6 +416,42 @@ mod tests {
 
         let out = String::from_utf8(out).unwrap();
         assert_eq!(out.lines().count(), 2);
+    }
+
+    #[tokio::test]
+    async fn run_only_aliased_emits_only_devices_with_alias() {
+        let aliased = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        let unaliased = MacAddress([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        let ts = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+
+        let scanner = FakeScanner::new(vec![
+            Ok(measurement(aliased, ts)),
+            Ok(measurement(unaliased, ts)),
+        ]);
+        let options = Options {
+            influxdb_measurement: "ruuvi_measurement".to_string(),
+            format: OutputFormat::InfluxDb,
+            aliases: vec![Alias {
+                address: aliased,
+                name: "Sauna".to_string(),
+            }],
+            verbose: false,
+            throttle: None,
+            backend: Backend::Bluer,
+            adapter: None,
+            only_aliased: true,
+        };
+
+        let mut out = Vec::<u8>::new();
+        let mut err = Vec::<u8>::new();
+        run_with_io(options, &scanner, &mut out, &mut err)
+            .await
+            .unwrap();
+
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("name=Sauna"));
+        assert!(!out.contains("11:22:33:44:55:66"));
+        assert_eq!(out.lines().count(), 1);
     }
 
     #[tokio::test]
@@ -420,6 +468,7 @@ mod tests {
             throttle: None,
             backend: Backend::Bluer,
             adapter: None,
+            only_aliased: false,
         };
 
         // non-verbose: nothing written
@@ -460,6 +509,7 @@ mod tests {
             throttle: None,
             backend: Backend::Bluer,
             adapter: None,
+            only_aliased: false,
         };
 
         let mut out = Vec::<u8>::new();
@@ -492,6 +542,7 @@ mod tests {
             throttle: None,
             backend: Backend::Bluer,
             adapter: None,
+            only_aliased: false,
         };
 
         let mut out = Vec::<u8>::new();
