@@ -75,6 +75,11 @@ pub fn resolve_name(mac: &MacAddress, aliases: &AliasMap) -> String {
     aliases.get(mac).cloned().unwrap_or_else(|| mac.to_string())
 }
 
+/// Returns `true` if the given MAC has an alias defined.
+pub fn has_alias(mac: &MacAddress, aliases: &AliasMap) -> bool {
+    aliases.contains_key(mac)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
