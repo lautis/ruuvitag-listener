@@ -5,7 +5,7 @@
 
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use ruuvitag_listener::{
-    AliasMap, InfluxDbFormatter, MacAddress, Measurement, OutputFormatter, resolve_name,
+    AliasMap, Format, InfluxDbFormatter, MacAddress, Measurement, OutputFormatter, resolve_name,
 };
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -16,6 +16,7 @@ const TEST_MAC: MacAddress = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 fn v5_measurement() -> Measurement {
     Measurement {
         mac: TEST_MAC,
+        format: Format::V5,
         timestamp: SystemTime::UNIX_EPOCH,
         temperature: Some(24.30),
         humidity: Some(53.49),
@@ -40,6 +41,7 @@ fn v5_measurement() -> Measurement {
 fn v6_measurement() -> Measurement {
     Measurement {
         mac: TEST_MAC,
+        format: Format::V6,
         timestamp: SystemTime::UNIX_EPOCH,
         temperature: Some(23.12),
         humidity: Some(55.68),
