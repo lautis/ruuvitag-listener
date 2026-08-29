@@ -90,7 +90,7 @@ impl Scanner for RealScanner {
 /// Data format 6 exists only for Bluetooth 4 compatibility and is a strict
 /// subset of E1. Once a device has produced an E1 advertisement, its V6 frames
 /// carry no additional data, so they are dropped. E1 frames record the device
-/// in `e1_devices`; V5 is an unrelated lineage and is never suppressed.
+/// in `e1_devices`; V3 and V5 are unrelated lineages and are never suppressed.
 ///
 /// Returns `true` if the measurement should be dropped.
 fn is_redundant_v6(e1_devices: &mut HashSet<MacAddress>, measurement: &Measurement) -> bool {
@@ -101,6 +101,7 @@ fn is_redundant_v6(e1_devices: &mut HashSet<MacAddress>, measurement: &Measureme
         }
         Format::V6 => e1_devices.contains(&measurement.mac),
         Format::V5 => false,
+        Format::V3 => false,
     }
 }
 

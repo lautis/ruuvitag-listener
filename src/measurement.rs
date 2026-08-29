@@ -10,6 +10,8 @@ use crate::mac_address::MacAddress;
 /// be dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
+    /// Data format 3 (RAWv1).
+    V3,
     /// Data format 5 (RAWv2).
     V5,
     /// Data format 6 (compact, Bluetooth 4 compatibility).

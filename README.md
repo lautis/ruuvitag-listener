@@ -2,7 +2,7 @@
 
 A command-line client to listen to [RuuviTag](https://ruuvi.com/ruuvitag/) and [Ruuvi Air](https://ruuvi.com/air/) sensor measurements over Bluetooth LE and output as [InfluxDB line protocol](https://docs.influxdata.com/influxdb/v1.7/write_protocols/line_protocol_reference/).
 
-The listener understands RuuviTag data formats 5 (RAWv2), 6 (compact BLE 4 compatible), and E1 (Ruuvi Air). Once a device has been seen emitting E1, its V6 frames are dropped as redundant since V6 is a strict subset of E1.
+The listener understands RuuviTag data formats 3 (RAWv1), 5 (RAWv2), 6 (compact BLE 4 compatible), and E1 (Ruuvi Air). Once a device has been seen emitting E1, its V6 frames are dropped as redundant since V6 is a strict subset of E1.
 
 The output can be used in e.g. [Telegraf Execd Input](https://github.com/influxdata/telegraf/tree/master/plugins/inputs/execd). For an example setup, check out [examples/telegraf](./examples/telegraf/README.md).
 

@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 /// Error types for decoding RuuviTag data.
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum DecodeError {
-    /// Unsupported RuuviTag data format (e.g., V2, V3, V4 when only V5 is supported)
+    /// Unsupported RuuviTag data format (e.g., V2 or V4, which are not supported)
     #[error("Unsupported format: {0}")]
     UnsupportedFormat(String),
     /// Invalid or corrupted data that cannot be decoded
@@ -126,7 +126,7 @@ impl std::str::FromStr for Backend {
 /// Decode manufacturer data from a RuuviTag into a Measurement.
 ///
 /// This function converts raw manufacturer data bytes into a structured `Measurement`
-/// with all values in standard SI units. Supports RuuviTag data formats V5, V6 and E1.
+/// with all values in standard SI units. Supports RuuviTag data formats V3, V5, V6 and E1.
 ///
 /// # Arguments
 /// * `mac` - The MAC address of the device
@@ -148,12 +148,13 @@ pub fn decode_ruuvi_data(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
     }
 
     let format = match data[0] {
+        3 => Format::V3,
         5 => Format::V5,
         6 => Format::V6,
         0xE1 => Format::E1,
         other => {
             return Err(DecodeError::UnsupportedFormat(format!(
-                "RuuviTag data format {other} (only V5, V6 and E1 supported)"
+                "RuuviTag data format {other} (only V3, V5, V6 and E1 supported)"
             )));
         }
     };
@@ -267,6 +268,21 @@ mod tests {
         ]
     }
 
+    fn v3_payload() -> Vec<u8> {
+        // Example V3 (RAWv1) payload without the manufacturer ID prefix,
+        // from the ruuvi-sensor-protocol crate documentation.
+        vec![
+            0x03, // Format 3
+            0x17, // Humidity: 11.5% (0x17 = 23, 23 * 0.5 = 11.5)
+            0x01, 0x45, // Temperature: 1.69°C (sign bit 0, 1°C + 69 * 0.01°C)
+            0x35, 0x58, // Pressure: 63656 Pa (0x3558 = 13656, 13656 + 50000 = 63656)
+            0x03, 0xE8, // Acceleration X: 1000 mG
+            0x04, 0xE7, // Acceleration Y: 1255 mG
+            0x05, 0xE6, // Acceleration Z: 1510 mG
+            0x08, 0x86, // Battery: 2182 mV
+        ]
+    }
+
     fn v6_payload() -> Vec<u8> {
         // Example V6 payload (includes format byte and compact MAC)
         vec![
@@ -291,6 +307,31 @@ mod tests {
         assert_eq!(measurement.measurement_sequence, Some(205));
         // Acceleration should be converted from mG to g
         assert_eq!(measurement.acceleration, Some((0.004, -0.004, 1.036)));
+        assert!(measurement.pm1_0.is_none());
+        assert!(measurement.pm2_5.is_none());
+        assert!(measurement.pm4_0.is_none());
+        assert!(measurement.pm10_0.is_none());
+        assert!(measurement.co2.is_none());
+        assert!(measurement.voc_index.is_none());
+        assert!(measurement.nox_index.is_none());
+        assert!(measurement.luminosity.is_none());
+    }
+
+    #[test]
+    fn test_decode_ruuvi_data_v3() {
+        let measurement = decode_ruuvi_data(TEST_MAC, &v3_payload()).unwrap();
+        assert_eq!(measurement.mac, TEST_MAC);
+        assert_eq!(measurement.format, Format::V3);
+        assert_close(measurement.temperature, 1.69);
+        assert_close(measurement.humidity, 11.5);
+        assert_close(measurement.pressure, 63_656.0);
+        assert_close(measurement.battery, 2.182);
+        // Acceleration should be converted from mG to g
+        assert_eq!(measurement.acceleration, Some((1.0, 1.255, 1.51)));
+        // Fields not present in V3 advertisements.
+        assert_eq!(measurement.tx_power, None);
+        assert_eq!(measurement.movement_counter, None);
+        assert_eq!(measurement.measurement_sequence, None);
         assert!(measurement.pm1_0.is_none());
         assert!(measurement.pm2_5.is_none());
         assert!(measurement.pm4_0.is_none());
