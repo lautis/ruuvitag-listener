@@ -7,10 +7,12 @@ use crate::alias::{Alias, AliasMap};
 use crate::mac_address::MacAddress;
 use crate::measurement::{Format, Measurement};
 use crate::output::OutputFormatter;
+use crate::output::csv::CsvFormatter;
 use crate::output::influxdb::InfluxDbFormatter;
+use crate::output::jsonl::JsonLinesFormatter;
 use crate::scanner::{Backend, MeasurementResult, ScanError};
 use crate::throttle::Throttle;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::collections::HashSet;
 use std::future::Future;
 use std::io;
@@ -20,6 +22,18 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
+/// Output format for measurements.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat {
+    /// InfluxDB line protocol (default).
+    #[value(name = "influxdb")]
+    InfluxDb,
+    /// JSON Lines: one JSON object per line.
+    Jsonl,
+    /// CSV with a header row.
+    Csv,
+}
+
 /// Configuration for the core run loop.
 #[derive(Parser, Debug, Clone)]
 #[command(author, about, version)]
@@ -27,6 +41,10 @@ pub struct Options {
     /// The name of the measurement in InfluxDB line protocol.
     #[arg(long, default_value = "ruuvi_measurement")]
     pub influxdb_measurement: String,
+
+    /// Output format for measurements.
+    #[arg(long, default_value = "influxdb", value_enum)]
+    pub format: OutputFormat,
 
     /// Specify human-readable alias for RuuviTag id.
     /// Format: --alias DE:AD:BE:EF:00:00=Sauna
@@ -132,7 +150,14 @@ pub async fn run_with_io(
     err: &mut dyn Write,
 ) -> Result<(), RunError> {
     let aliases: AliasMap = crate::alias::to_map(&options.aliases);
-    let formatter = InfluxDbFormatter::new(options.influxdb_measurement);
+    let formatter: Box<dyn OutputFormatter> = match options.format {
+        OutputFormat::InfluxDb => Box::new(InfluxDbFormatter::new(options.influxdb_measurement)),
+        OutputFormat::Jsonl => Box::new(JsonLinesFormatter::new()),
+        OutputFormat::Csv => Box::new(CsvFormatter::new()),
+    };
+    if let Some(header) = formatter.header() {
+        writeln!(out, "{header}")?;
+    }
 
     // Create throttle if interval is specified
     let mut throttle = options.throttle.map(Throttle::new);
@@ -157,7 +182,7 @@ pub async fn run_with_io(
 
                 if should_emit {
                     let name = crate::alias::resolve_name(&measurement.mac, &aliases);
-                    write_measurement(&formatter, &measurement, &name, out)?;
+                    write_measurement(&*formatter, &measurement, &name, out)?;
                 }
             }
             Err(decode_err) => {
@@ -260,6 +285,7 @@ mod tests {
         let scanner = FakeScanner::new(vec![Ok(m)]);
         let options = Options {
             influxdb_measurement: "ruuvi_measurement".to_string(),
+            format: OutputFormat::InfluxDb,
             aliases: vec![],
             verbose: false,
             throttle: None,
@@ -292,6 +318,7 @@ mod tests {
         let scanner = FakeScanner::new(vec![Ok(m1), Ok(m2)]);
         let options = Options {
             influxdb_measurement: "ruuvi_measurement".to_string(),
+            format: OutputFormat::InfluxDb,
             aliases: vec![],
             verbose: false,
             throttle: Some(Duration::from_secs(3600)),
@@ -361,6 +388,7 @@ mod tests {
         ]);
         let options = Options {
             influxdb_measurement: "ruuvi_measurement".to_string(),
+            format: OutputFormat::InfluxDb,
             aliases: vec![],
             verbose: false,
             throttle: None,
@@ -386,6 +414,7 @@ mod tests {
 
         let base = Options {
             influxdb_measurement: "ruuvi_measurement".to_string(),
+            format: OutputFormat::InfluxDb,
             aliases: vec![],
             verbose: false,
             throttle: None,
@@ -414,5 +443,68 @@ mod tests {
         assert!(out.is_empty());
         let err = String::from_utf8(err).unwrap();
         assert!(err.contains("Invalid data: bad packet"));
+    }
+
+    #[tokio::test]
+    async fn run_csv_writes_header_then_rows() {
+        let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let m = measurement(mac, timestamp);
+
+        let scanner = FakeScanner::new(vec![Ok(m)]);
+        let options = Options {
+            influxdb_measurement: "ruuvi_measurement".to_string(),
+            format: OutputFormat::Csv,
+            aliases: vec![],
+            verbose: false,
+            throttle: None,
+            backend: Backend::Bluer,
+            adapter: None,
+        };
+
+        let mut out = Vec::<u8>::new();
+        let mut err = Vec::<u8>::new();
+        run_with_io(options, &scanner, &mut out, &mut err)
+            .await
+            .unwrap();
+
+        let out = String::from_utf8(out).unwrap();
+        let mut lines = out.lines();
+        let header = lines.next().unwrap();
+        assert!(header.starts_with("mac,name,timestamp,format,"));
+        let row = lines.next().unwrap();
+        assert!(row.starts_with("AA:BB:CC:DD:EE:FF,AA:BB:CC:DD:EE:FF,"));
+        assert_eq!(lines.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn run_jsonl_writes_json_objects() {
+        let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let m = measurement(mac, timestamp);
+
+        let scanner = FakeScanner::new(vec![Ok(m)]);
+        let options = Options {
+            influxdb_measurement: "ruuvi_measurement".to_string(),
+            format: OutputFormat::Jsonl,
+            aliases: vec![],
+            verbose: false,
+            throttle: None,
+            backend: Backend::Bluer,
+            adapter: None,
+        };
+
+        let mut out = Vec::<u8>::new();
+        let mut err = Vec::<u8>::new();
+        run_with_io(options, &scanner, &mut out, &mut err)
+            .await
+            .unwrap();
+
+        let out = String::from_utf8(out).unwrap();
+        let line = out.trim_end();
+        assert!(line.starts_with("{\"mac\":\"AA:BB:CC:DD:EE:FF\""));
+        assert!(line.contains("\"format\":\"v5\""));
+        assert!(line.contains("\"temperature\":25.5"));
+        assert!(line.ends_with('}'));
     }
 }

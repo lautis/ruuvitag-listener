@@ -20,6 +20,8 @@ pub use alias::{Alias, AliasMap, parse_alias, resolve_name, to_map};
 pub use mac_address::MacAddress;
 pub use measurement::{Format, Measurement};
 pub use output::OutputFormatter;
+pub use output::csv::CsvFormatter;
 pub use output::influxdb::InfluxDbFormatter;
+pub use output::jsonl::JsonLinesFormatter;
 pub use scanner::{Backend, DecodeError, MeasurementResult, ScanError, decode_ruuvi_data};
 pub use throttle::{Throttle, parse_duration};

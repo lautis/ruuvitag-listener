@@ -1,6 +1,6 @@
 # RuuviTag Listener
 
-A command-line client to listen to [RuuviTag](https://ruuvi.com/ruuvitag/) and [Ruuvi Air](https://ruuvi.com/air/) sensor measurements over Bluetooth LE and output as [InfluxDB line protocol](https://docs.influxdata.com/influxdb/v1.7/write_protocols/line_protocol_reference/).
+A command-line client to listen to [RuuviTag](https://ruuvi.com/ruuvitag/) and [Ruuvi Air](https://ruuvi.com/air/) sensor measurements over Bluetooth LE and output as [InfluxDB line protocol](https://docs.influxdata.com/influxdb/v1.7/write_protocols/line_protocol_reference/), JSON Lines, or CSV.
 
 The listener understands RuuviTag data formats 3 (RAWv1), 5 (RAWv2), 6 (compact BLE 4 compatible), and E1 (Ruuvi Air). Once a device has been seen emitting E1, its V6 frames are dropped as redundant since V6 is a strict subset of E1.
 
@@ -116,6 +116,39 @@ ruuvitag-listener --influxdb-measurement=ruuvi --alias F1:FC:AA:80:4E:59=Indoor 
 ruuvi,mac=F1:FC:AA:80:4E:59,name=Indoor acceleration_x=0,acceleration_y=0.017,acceleration_z=1.027,battery_potential=2.989,humidity=17.5,pressure=101.54,temperature=21.97 1546681957964524841
 ruuvi,mac=F7:2A:60:0D:6E:1E,name=Outdoor acceleration_x=-0.054,acceleration_y=-0.032,acceleration_z=1.005,battery_potential=3.013,humidity=83.5,pressure=101.487,temperature=-5.63 1546681958085455294
 ```
+
+## Output Formats
+
+The output format is selected with `--format`:
+
+| Format     | Description                                                       |
+| ---------- | ----------------------------------------------------------------- |
+| `influxdb` | InfluxDB line protocol (default)                                  |
+| `jsonl`    | JSON Lines: one JSON object per line                              |
+| `csv`      | CSV with a header row; values missing from the frame are left empty |
+
+```sh
+ruuvitag-listener --format jsonl
+```
+
+```
+{"mac":"F1:FC:AA:80:4E:59","name":"Indoor","format":"v5","timestamp":"2019-01-05T09:47:35.691300729Z","temperature":21.97,"humidity":17.5,"pressure":101.536,"battery_potential":2.989,"acceleration_x":0.005,"acceleration_y":0.015,"acceleration_z":1.036}
+```
+
+JSON Lines omits fields that are absent from the advertisement.
+
+```sh
+ruuvitag-listener --format csv > measurements.csv
+```
+
+```
+mac,name,timestamp,format,temperature,humidity,pressure,battery_potential,tx_power,movement_counter,measurement_sequence_number,acceleration_x,acceleration_y,acceleration_z,pm1_0,pm2_5,pm4_0,pm10_0,co2,voc_index,nox_index,luminosity
+F1:FC:AA:80:4E:59,Indoor,2019-01-05T09:47:35.691300729Z,v5,21.97,17.5,101.536,2.989,,,0.005,0.015,1.036,,,,,,,,
+```
+
+In JSON Lines and CSV output, timestamps are RFC 3339 in UTC and pressure is
+reported in kilopascals, matching the InfluxDB line protocol output. The
+`--influxdb-measurement` option only applies to `--format influxdb`.
 
 All options can be listed with `ruuvitag-listener --help`.
 

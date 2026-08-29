@@ -20,6 +20,18 @@ pub enum Format {
     E1,
 }
 
+impl Format {
+    /// Lowercase identifier for this format, used by JSON and CSV output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Format::V3 => "v3",
+            Format::V5 => "v5",
+            Format::V6 => "v6",
+            Format::E1 => "e1",
+        }
+    }
+}
+
 /// A measurement from a RuuviTag sensor.
 ///
 /// All values are in standard SI units:

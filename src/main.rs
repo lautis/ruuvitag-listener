@@ -12,7 +12,7 @@ const EXIT_PANIC: i32 = 2;
 ///
 /// This function:
 /// 1. Converts CLI aliases into a lookup map
-/// 2. Creates an InfluxDB formatter with the specified measurement name
+/// 2. Creates the output formatter selected with --format (InfluxDB line protocol by default)
 /// 3. Optionally creates a throttle to limit event frequency per tag
 /// 4. Starts the BLE scanner
 /// 5. Processes measurements and outputs them to stdout until interrupted

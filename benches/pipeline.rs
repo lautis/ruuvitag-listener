@@ -84,6 +84,7 @@ impl Scanner for FakeScanner {
 fn default_options() -> Options {
     Options {
         influxdb_measurement: "ruuvi_measurement".to_string(),
+        format: ruuvitag_listener::app::OutputFormat::InfluxDb,
         aliases: vec![],
         verbose: false,
         throttle: None,

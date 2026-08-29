@@ -21,6 +21,7 @@ tokio = { version = "1", features = ["rt", "macros", "sync"] }
 futures = { version = "0.3", optional = true }
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
