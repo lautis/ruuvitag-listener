@@ -40,6 +40,7 @@ impl Format {
 /// - Pressure in Pascals
 /// - Battery voltage in Volts
 /// - TX power in dBm
+/// - RSSI in dBm
 /// - Acceleration in g (standard gravity)
 /// - PM2.5 in micrograms per cubic meter (ug/m3)
 /// - CO2 in parts per million (ppm)
@@ -63,6 +64,12 @@ pub struct Measurement {
     pub battery: Option<f64>,
     /// TX power in dBm
     pub tx_power: Option<i8>,
+    /// Received signal strength indicator (RSSI) in dBm.
+    ///
+    /// Unlike `tx_power` (which is part of the sensor payload), RSSI is a radio
+    /// property of the advertisement as captured by the scanning adapter. It is
+    /// `None` when the backend does not report a signal strength.
+    pub rssi: Option<i8>,
     /// Movement counter
     pub movement_counter: Option<u32>,
     /// Measurement sequence number

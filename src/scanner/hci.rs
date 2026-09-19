@@ -5,8 +5,8 @@
 //! CAP_NET_ADMIN capabilities or root privileges.
 
 use super::{
-    DecodeError, MEASUREMENT_CHANNEL_BUFFER_SIZE, MeasurementResult, RUUVI_MANUFACTURER_ID,
-    ScanError, decode_ruuvi_data,
+    DecodeError, MEASUREMENT_CHANNEL_BUFFER_SIZE, MeasurementResult, RSSI_UNAVAILABLE,
+    RUUVI_MANUFACTURER_ID, ScanError, decode_ruuvi_data, with_rssi,
 };
 use crate::mac_address::MacAddress;
 use libc::{
@@ -853,7 +853,7 @@ fn parse_advertising_report(data: &[u8], verbose: bool) -> Option<MeasurementRes
     }
 
     // Legacy per-report header:
-    //   num_reports(1) event_type(1) addr_type(1) address(6) data_len(1) data(..)
+    //   num_reports(1) event_type(1) addr_type(1) address(6) data_len(1) data(..) rssi(1)
     // Extract address (6 bytes, in reverse order)
     if report.len() < 10 {
         return None;
@@ -867,7 +867,14 @@ fn parse_advertising_report(data: &[u8], verbose: bool) -> Option<MeasurementRes
         return None;
     }
 
-    parse_ruuvi_from_ad_data(&report[10..10 + data_len], addr)
+    // The RSSI byte follows the advertising data; a truncated report means
+    // the controller did not include it.
+    let rssi = report
+        .get(10 + data_len)
+        .copied()
+        .unwrap_or(RSSI_UNAVAILABLE as u8) as i8;
+
+    parse_ruuvi_from_ad_data(&report[10..10 + data_len], addr, rssi)
 }
 
 /// Parse an LE Extended Advertising Report (subevent 0x0D) and extract RuuviTag data.
@@ -911,13 +918,18 @@ fn parse_extended_advertising_report(data: &[u8], _verbose: bool) -> Option<Meas
     if report.len() < 25 + data_len {
         return None;
     }
+    let rssi = report[14] as i8; // RSSI byte in the extended per-report header
 
-    parse_ruuvi_from_ad_data(&report[25..25 + data_len], addr)
+    parse_ruuvi_from_ad_data(&report[25..25 + data_len], addr, rssi)
 }
 
 /// Walk the AD structures of an advertisement and decode any RuuviTag
 /// manufacturer data found.
-fn parse_ruuvi_from_ad_data(ad_data: &[u8], addr: [u8; 6]) -> Option<MeasurementResult> {
+///
+/// `rssi` is the signal strength (dBm) reported by the controller for this
+/// advertisement; the HCI "not available" sentinel is handled by
+/// [`super::with_rssi`].
+fn parse_ruuvi_from_ad_data(ad_data: &[u8], addr: [u8; 6], rssi: i8) -> Option<MeasurementResult> {
     let mut offset = 0;
     while offset + 2 <= ad_data.len() {
         let len = ad_data[offset] as usize;
@@ -934,7 +946,10 @@ fn parse_ruuvi_from_ad_data(ad_data: &[u8], addr: [u8; 6]) -> Option<Measurement
             if mfg_id == RUUVI_MANUFACTURER_ID {
                 // Found RuuviTag data
                 let ruuvi_data = &ad_data[offset + 4..offset + 1 + len];
-                return Some(decode_ruuvi_data(MacAddress(addr), ruuvi_data));
+                return Some(match decode_ruuvi_data(MacAddress(addr), ruuvi_data) {
+                    Ok(measurement) => Ok(with_rssi(measurement, rssi)),
+                    Err(e) => Err(e),
+                });
             }
         }
 
@@ -1168,6 +1183,61 @@ mod tests {
             measurement.mac,
             MacAddress([0x06, 0x05, 0x04, 0x03, 0x02, 0x01])
         );
+        // RSSI 0xC3 = -61 dBm, from the extended per-report header.
+        assert_eq!(measurement.rssi, Some(-61));
+    }
+
+    #[test]
+    fn test_parse_legacy_advertising_report_with_rssi() {
+        let payload = ruuvi_rawv2_payload();
+        let mut ad = vec![(payload.len() + 1) as u8, AD_TYPE_MANUFACTURER_DATA];
+        ad.extend_from_slice(&payload);
+
+        // HCI header + legacy report header, data, and a trailing RSSI byte.
+        let mut pkt = vec![
+            HCI_EVENT_PKT,
+            EVT_LE_META_EVENT,
+            0x00,
+            EVT_LE_ADVERTISING_REPORT,
+        ];
+        pkt.push(0x01); // num_reports
+        pkt.push(0x00); // event_type
+        pkt.push(0x00); // address_type
+        pkt.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]); // address (LE)
+        pkt.push(ad.len() as u8); // data_len
+        pkt.extend_from_slice(&ad);
+        pkt.push(0xB0); // RSSI = -80 dBm
+
+        assert!(might_be_ruuvi(&pkt));
+        let result = parse_advertising_report(&pkt, false);
+        let measurement = result.unwrap().expect("payload should decode");
+        assert_eq!(measurement.rssi, Some(-80));
+    }
+
+    #[test]
+    fn test_parse_report_maps_rssi_sentinel_to_none() {
+        let payload = ruuvi_rawv2_payload();
+        let mut ad = vec![(payload.len() + 1) as u8, AD_TYPE_MANUFACTURER_DATA];
+        ad.extend_from_slice(&payload);
+
+        // Legacy report whose RSSI byte is the 127 "not available" sentinel.
+        let mut pkt = vec![
+            HCI_EVENT_PKT,
+            EVT_LE_META_EVENT,
+            0x00,
+            EVT_LE_ADVERTISING_REPORT,
+        ];
+        pkt.push(0x01);
+        pkt.push(0x00);
+        pkt.push(0x00);
+        pkt.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+        pkt.push(ad.len() as u8);
+        pkt.extend_from_slice(&ad);
+        pkt.push(RSSI_UNAVAILABLE as u8);
+
+        let result = parse_advertising_report(&pkt, false);
+        let measurement = result.unwrap().expect("payload should decode");
+        assert_eq!(measurement.rssi, None);
     }
 
     #[test]

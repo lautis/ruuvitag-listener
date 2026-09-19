@@ -123,6 +123,16 @@ async fn process_device(
     // Decode and send the measurement
     match decode_ruuvi_data(mac, ruuvi_data) {
         Ok(measurement) => {
+            // RSSI is a radio property exposed over D-Bus, not part of the
+            // Ruuvi payload. Errors are ignored so a transient D-Bus failure
+            // never discards an otherwise valid measurement.
+            let measurement = match device.rssi().await {
+                Ok(Some(rssi)) => match i8::try_from(rssi) {
+                    Ok(rssi) => super::with_rssi(measurement, rssi),
+                    Err(_) => measurement,
+                },
+                _ => measurement,
+            };
             let _ = tx.send(Ok(measurement)).await;
         }
         Err(e) if verbose => {

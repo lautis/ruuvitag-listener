@@ -18,6 +18,7 @@ pub fn base_measurement(mac: MacAddress, timestamp: SystemTime) -> Measurement {
         pressure: None,
         battery: None,
         tx_power: None,
+        rssi: None,
         movement_counter: None,
         measurement_sequence: None,
         acceleration: None,
