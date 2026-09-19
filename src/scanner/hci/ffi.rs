@@ -6,7 +6,79 @@ use crate::scanner::ScanError;
 use libc::{AF_BLUETOOTH, SOCK_CLOEXEC, SOCK_RAW, c_int, c_void, sockaddr, socklen_t};
 use std::io;
 use std::mem;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::ops::Deref;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+
+/// Owned raw HCI socket bound to one controller.
+pub(crate) struct HciSocket {
+    fd: OwnedFd,
+}
+
+impl HciSocket {
+    /// Open a raw HCI socket and bind it to the given controller.
+    pub(crate) fn open(dev_id: u16) -> Result<Self, ScanError> {
+        let fd = open_hci_socket()?;
+        bind_hci_socket(&fd, dev_id)?;
+        Ok(Self { fd })
+    }
+
+    /// Restrict kernel-delivered packets to LE Meta Events.
+    pub(crate) fn set_event_filter(&self) -> Result<(), ScanError> {
+        set_hci_filter(&self.fd)
+    }
+
+    /// Restrict kernel-delivered packets to Command Complete events.
+    pub(crate) fn set_command_filter(&self) -> Result<(), ScanError> {
+        set_command_hci_filter(&self.fd)
+    }
+
+    /// Dispatch an HCI command and return its Command Complete status and event.
+    ///
+    /// Unlike [`Self::command_checked`], this does not treat a non-zero status
+    /// as an error, so callers can decide which status codes are acceptable.
+    fn command(&self, ogf: u16, ocf: u16, params: &[u8]) -> Result<(u8, Vec<u8>), ScanError> {
+        let packet = hci_command_packet(ogf, ocf, params);
+        send_hci_command(&self.fd, &packet)?;
+
+        let event = read_command_complete(&self.fd, hci_opcode(ogf, ocf))?;
+
+        // Status is the first return parameter, at byte 6.
+        let status = *event.get(6).ok_or_else(|| {
+            ScanError::Bluetooth("Truncated HCI Command Complete event".to_string())
+        })?;
+        Ok((status, event))
+    }
+
+    /// Send an HCI command and verify its Command Complete status is success.
+    ///
+    /// Returns the full Command Complete event so callers can read additional
+    /// return parameters. Surfacing a non-zero status here turns what used to be a
+    /// silent "no events ever arrive" failure into an explicit error.
+    fn command_checked(&self, ogf: u16, ocf: u16, params: &[u8]) -> Result<Vec<u8>, ScanError> {
+        let opcode = hci_opcode(ogf, ocf);
+        let (status, event) = self.command(ogf, ocf, params)?;
+        if status != 0 {
+            return Err(ScanError::Bluetooth(format!(
+                "HCI command {opcode:#06x} failed with status {status:#04x}"
+            )));
+        }
+        Ok(event)
+    }
+}
+
+impl AsRawFd for HciSocket {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+impl Deref for HciSocket {
+    type Target = OwnedFd;
+
+    fn deref(&self) -> &OwnedFd {
+        &self.fd
+    }
+}
 
 /// HCI socket address structure
 #[repr(C)]
@@ -84,9 +156,22 @@ struct LeSetExtendedScanEnableCmd {
     period: u16,
 }
 
+/// Compose an HCI opcode from an OGF and OCF.
+fn hci_opcode(ogf: u16, ocf: u16) -> u16 {
+    (ogf << 10) | ocf
+}
+
+/// View a value as raw bytes (only sound for the `#[repr(C)]`/`#[repr(C, packed)]`
+/// command structs this is used with).
+fn as_bytes<T>(value: &T) -> &[u8] {
+    // Safety: only sound for #[repr(C)]/#[repr(C, packed)] structs such as the
+    // command types this helper is used with.
+    unsafe { std::slice::from_raw_parts(value as *const T as *const u8, mem::size_of::<T>()) }
+}
+
 /// Create an HCI command packet
 fn hci_command_packet(ogf: u16, ocf: u16, params: &[u8]) -> Vec<u8> {
-    let opcode = (ogf << 10) | ocf;
+    let opcode = hci_opcode(ogf, ocf);
     let mut packet = Vec::with_capacity(4 + params.len());
     packet.push(0x01); // HCI command packet type
     packet.push((opcode & 0xFF) as u8);
@@ -96,8 +181,13 @@ fn hci_command_packet(ogf: u16, ocf: u16, params: &[u8]) -> Vec<u8> {
     packet
 }
 
+/// Build a `ScanError::Bluetooth` from the latest OS error for `action`.
+fn ffi_err(action: &str) -> ScanError {
+    ScanError::Bluetooth(format!("{action}: {}", io::Error::last_os_error()))
+}
+
 /// Open a raw HCI socket
-pub(crate) fn open_hci_socket() -> Result<OwnedFd, ScanError> {
+fn open_hci_socket() -> Result<OwnedFd, ScanError> {
     // Create a raw Bluetooth HCI socket using libc directly
     // since nix doesn't support BTPROTO_HCI
     // SOCK_NONBLOCK is required for AsyncFd to work properly
@@ -110,17 +200,14 @@ pub(crate) fn open_hci_socket() -> Result<OwnedFd, ScanError> {
     };
 
     if fd < 0 {
-        return Err(ScanError::Bluetooth(format!(
-            "Failed to create HCI socket: {}",
-            io::Error::last_os_error()
-        )));
+        return Err(ffi_err("Failed to create HCI socket"));
     }
 
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 /// Bind HCI socket to a device
-pub(crate) fn bind_hci_socket(fd: &OwnedFd, dev_id: u16) -> Result<(), ScanError> {
+fn bind_hci_socket(fd: &OwnedFd, dev_id: u16) -> Result<(), ScanError> {
     let addr = SockaddrHci {
         hci_family: AF_BLUETOOTH as u16,
         hci_dev: dev_id,
@@ -136,10 +223,7 @@ pub(crate) fn bind_hci_socket(fd: &OwnedFd, dev_id: u16) -> Result<(), ScanError
     };
 
     if ret < 0 {
-        return Err(ScanError::Bluetooth(format!(
-            "Failed to bind HCI socket: {}",
-            io::Error::last_os_error()
-        )));
+        return Err(ffi_err("Failed to bind HCI socket"));
     }
 
     Ok(())
@@ -160,7 +244,7 @@ pub(crate) fn bind_hci_socket(fd: &OwnedFd, dev_id: u16) -> Result<(), ScanError
 /// Note: HCI_FILTER cannot filter by LE subevent type, so we still receive
 /// all LE Meta Events (connection complete, advertising reports, etc.).
 /// The BPF filter (set_bpf_ruuvi_filter) provides finer-grained filtering.
-pub(crate) fn set_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
+fn set_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
     let mut filter = HciFilter::new();
     filter.set_ptype(HCI_EVENT_PKT); // Only HCI event packets (0x04)
     filter.set_event(EVT_LE_META_EVENT); // Only LE Meta Events (0x3E)
@@ -173,7 +257,7 @@ pub(crate) fn set_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
 /// to setup commands (feature query, scan enable). A freshly opened HCI raw
 /// socket has an all-zero filter that drops *every* packet, so without this the
 /// command responses would never reach userspace.
-pub(crate) fn set_command_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
+fn set_command_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
     let mut filter = HciFilter::new();
     filter.set_ptype(HCI_EVENT_PKT);
     filter.set_event(EVT_CMD_COMPLETE);
@@ -193,10 +277,7 @@ fn apply_hci_filter(fd: &OwnedFd, filter: &HciFilter) -> Result<(), ScanError> {
     };
 
     if ret < 0 {
-        return Err(ScanError::Bluetooth(format!(
-            "Failed to set HCI filter: {}",
-            io::Error::last_os_error()
-        )));
+        return Err(ffi_err("Failed to set HCI filter"));
     }
 
     Ok(())
@@ -213,13 +294,21 @@ fn send_hci_command(fd: &OwnedFd, packet: &[u8]) -> Result<(), ScanError> {
     };
 
     if ret < 0 {
-        return Err(ScanError::Bluetooth(format!(
-            "Failed to send HCI command: {}",
-            io::Error::last_os_error()
-        )));
+        return Err(ffi_err("Failed to send HCI command"));
     }
 
     Ok(())
+}
+
+/// Read up to `buf.len()` bytes from `fd` into `buf`.
+pub(crate) fn read_packet(fd: &impl AsRawFd, buf: &mut [u8]) -> io::Result<usize> {
+    // Safety: `read` is given a writable buffer of the correct length.
+    let ret = unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr() as *mut c_void, buf.len()) };
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 /// Wait for the Command Complete event matching `expected_opcode`.
@@ -229,7 +318,7 @@ fn send_hci_command(fd: &OwnedFd, packet: &[u8]) -> Result<(), ScanError> {
 /// Command Complete events from other openers of the controller are skipped.
 fn read_command_complete(fd: &OwnedFd, expected_opcode: u16) -> Result<Vec<u8>, ScanError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(COMMAND_TIMEOUT_MS);
-    let mut buf = [0u8; 258];
+    let mut buf = [0u8; HCI_EVENT_BUF_SIZE];
 
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -279,58 +368,14 @@ fn read_command_complete(fd: &OwnedFd, expected_opcode: u16) -> Result<Vec<u8>, 
     }
 }
 
-/// Dispatch an HCI command and return its Command Complete status and event.
-///
-/// Unlike [`send_hci_command_checked`], this does not treat a non-zero status
-/// as an error, so callers can decide which status codes are acceptable.
-fn send_hci_command_with_status(
-    fd: &OwnedFd,
-    ogf: u16,
-    ocf: u16,
-    params: &[u8],
-) -> Result<(u8, Vec<u8>), ScanError> {
-    let packet = hci_command_packet(ogf, ocf, params);
-    send_hci_command(fd, &packet)?;
-
-    let event = read_command_complete(fd, (ogf << 10) | ocf)?;
-
-    // Status is the first return parameter, at byte 6.
-    let status = *event
-        .get(6)
-        .ok_or_else(|| ScanError::Bluetooth("Truncated HCI Command Complete event".to_string()))?;
-    Ok((status, event))
-}
-
-/// Send an HCI command and verify its Command Complete status is success.
-///
-/// Returns the full Command Complete event so callers can read additional
-/// return parameters. Surfacing a non-zero status here turns what used to be a
-/// silent "no events ever arrive" failure into an explicit error.
-fn send_hci_command_checked(
-    fd: &OwnedFd,
-    ogf: u16,
-    ocf: u16,
-    params: &[u8],
-) -> Result<Vec<u8>, ScanError> {
-    let opcode = (ogf << 10) | ocf;
-    let (status, event) = send_hci_command_with_status(fd, ogf, ocf, params)?;
-    if status != 0 {
-        return Err(ScanError::Bluetooth(format!(
-            "HCI command {opcode:#06x} failed with status {status:#04x}"
-        )));
-    }
-    Ok(event)
-}
-
 /// Query whether the controller supports LE Extended Advertising.
 ///
 /// Reads the LE features bitmap and checks the Extended Advertising bit. A
 /// Bluetooth 5 controller (e.g. Intel AX210) reports advertisements via
 /// Extended Advertising Reports once extended scanning is enabled, so we must
 /// drive it with the extended scan commands instead of the legacy ones.
-fn controller_supports_extended_scan(fd: &OwnedFd) -> Result<bool, ScanError> {
-    let event =
-        send_hci_command_checked(fd, OGF_LE_CTL, OCF_LE_READ_LOCAL_SUPPORTED_FEATURES, &[])?;
+fn controller_supports_extended_scan(fd: &HciSocket) -> Result<bool, ScanError> {
+    let event = fd.command_checked(OGF_LE_CTL, OCF_LE_READ_LOCAL_SUPPORTED_FEATURES, &[])?;
 
     // Return params after status (byte 6) are the 8-byte LE features bitmap.
     let features_start = 7;
@@ -342,7 +387,7 @@ fn controller_supports_extended_scan(fd: &OwnedFd) -> Result<bool, ScanError> {
 
 /// Configure LE scanning, preferring extended scanning when the controller
 /// supports it.
-pub(crate) fn configure_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
+pub(crate) fn configure_le_scan(fd: &HciSocket) -> Result<(), ScanError> {
     if controller_supports_extended_scan(fd)? {
         configure_extended_le_scan(fd)
     } else {
@@ -355,7 +400,7 @@ pub(crate) fn configure_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
 /// The controller's feature set determines which disable command it accepts
 /// (legacy vs extended). Both disable paths tolerate "Command Disallowed" for
 /// an already-disabled scan.
-pub(crate) fn disable_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
+pub(crate) fn disable_le_scan(fd: &HciSocket) -> Result<(), ScanError> {
     if controller_supports_extended_scan(fd)? {
         set_extended_scan_enable(fd, false)
     } else {
@@ -364,7 +409,7 @@ pub(crate) fn disable_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
 }
 
 /// Configure legacy (Bluetooth 4.x) LE scanning parameters.
-fn configure_legacy_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
+fn configure_legacy_le_scan(fd: &HciSocket) -> Result<(), ScanError> {
     // Setting scan parameters is rejected with "Command Disallowed" while
     // scanning is already active (e.g. bluetoothd is running a discovery), so
     // disable scanning first. Disabling an already-disabled scan is a no-op
@@ -383,14 +428,7 @@ fn configure_legacy_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
         filter_policy: FILTER_POLICY_ACCEPT_ALL,
     };
 
-    let params_bytes = unsafe {
-        std::slice::from_raw_parts(
-            &params as *const LeSetScanParametersCmd as *const u8,
-            mem::size_of::<LeSetScanParametersCmd>(),
-        )
-    };
-
-    send_hci_command_checked(fd, OGF_LE_CTL, OCF_LE_SET_SCAN_PARAMETERS, params_bytes)?;
+    fd.command_checked(OGF_LE_CTL, OCF_LE_SET_SCAN_PARAMETERS, as_bytes(&params))?;
 
     set_legacy_scan_enable(fd, true)?;
 
@@ -398,20 +436,13 @@ fn configure_legacy_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
 }
 
 /// Enable or disable legacy LE scanning.
-fn set_legacy_scan_enable(fd: &OwnedFd, enable: bool) -> Result<(), ScanError> {
+fn set_legacy_scan_enable(fd: &HciSocket, enable: bool) -> Result<(), ScanError> {
     let cmd = LeSetScanEnableCmd {
         enable: enable as u8,
         filter_dup: 0x00, // Don't filter duplicates
     };
 
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            &cmd as *const LeSetScanEnableCmd as *const u8,
-            mem::size_of::<LeSetScanEnableCmd>(),
-        )
-    };
-
-    send_scan_enable(fd, OCF_LE_SET_SCAN_ENABLE, bytes, enable)
+    send_scan_enable(fd, OCF_LE_SET_SCAN_ENABLE, as_bytes(&cmd), enable)
 }
 
 /// Whether a returned status is acceptable for an LE scan enable/disable
@@ -426,9 +457,14 @@ fn scan_enable_status_ok(enable: bool, status: u8) -> bool {
 
 /// Send an LE scan enable/disable command, tolerating `Command Disallowed`
 /// when disabling an already-disabled scan.
-fn send_scan_enable(fd: &OwnedFd, ocf: u16, params: &[u8], enable: bool) -> Result<(), ScanError> {
-    let opcode = (OGF_LE_CTL << 10) | ocf;
-    let (status, _event) = send_hci_command_with_status(fd, OGF_LE_CTL, ocf, params)?;
+fn send_scan_enable(
+    fd: &HciSocket,
+    ocf: u16,
+    params: &[u8],
+    enable: bool,
+) -> Result<(), ScanError> {
+    let opcode = hci_opcode(OGF_LE_CTL, ocf);
+    let (status, _event) = fd.command(OGF_LE_CTL, ocf, params)?;
     if !scan_enable_status_ok(enable, status) {
         return Err(ScanError::Bluetooth(format!(
             "HCI command {opcode:#06x} failed with status {status:#04x}"
@@ -443,7 +479,7 @@ fn send_scan_enable(fd: &OwnedFd, ocf: u16, params: &[u8], enable: bool) -> Resu
 /// LE 1M PHY) using the extended scan commands. Controllers that have been put
 /// into extended mode only report advertisements via Extended Advertising
 /// Reports, so the legacy `LE Set Scan Enable` command would be rejected.
-fn configure_extended_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
+fn configure_extended_le_scan(fd: &HciSocket) -> Result<(), ScanError> {
     // Setting scan parameters is rejected with "Command Disallowed" while
     // scanning is already active (e.g. bluetoothd is running a discovery), so
     // disable scanning first. Disabling an already-disabled scan is a no-op
@@ -460,18 +496,10 @@ fn configure_extended_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
         window: 0x0140,   // 200ms in 0.625ms units
     };
 
-    let params_bytes = unsafe {
-        std::slice::from_raw_parts(
-            &params as *const LeSetExtendedScanParametersCmd as *const u8,
-            mem::size_of::<LeSetExtendedScanParametersCmd>(),
-        )
-    };
-
-    send_hci_command_checked(
-        fd,
+    fd.command_checked(
         OGF_LE_CTL,
         OCF_LE_SET_EXTENDED_SCAN_PARAMETERS,
-        params_bytes,
+        as_bytes(&params),
     )?;
 
     set_extended_scan_enable(fd, true)?;
@@ -480,7 +508,7 @@ fn configure_extended_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
 }
 
 /// Enable or disable extended LE scanning (continuous: duration = period = 0).
-fn set_extended_scan_enable(fd: &OwnedFd, enable: bool) -> Result<(), ScanError> {
+fn set_extended_scan_enable(fd: &HciSocket, enable: bool) -> Result<(), ScanError> {
     let cmd = LeSetExtendedScanEnableCmd {
         enable: enable as u8,
         filter_dup: 0x00, // Don't filter duplicates
@@ -488,14 +516,7 @@ fn set_extended_scan_enable(fd: &OwnedFd, enable: bool) -> Result<(), ScanError>
         period: 0x0000,
     };
 
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            &cmd as *const LeSetExtendedScanEnableCmd as *const u8,
-            mem::size_of::<LeSetExtendedScanEnableCmd>(),
-        )
-    };
-
-    send_scan_enable(fd, OCF_LE_SET_EXTENDED_SCAN_ENABLE, bytes, enable)
+    send_scan_enable(fd, OCF_LE_SET_EXTENDED_SCAN_ENABLE, as_bytes(&cmd), enable)
 }
 
 #[cfg(test)]
@@ -521,6 +542,41 @@ mod tests {
 
         assert_eq!(packet[0], 0x01); // Command packet type
         assert_eq!(packet.len(), 6); // Header + 2 params
+    }
+
+    #[test]
+    fn test_as_bytes() {
+        let cmd = LeSetScanEnableCmd {
+            enable: 1,
+            filter_dup: 0,
+        };
+        assert_eq!(as_bytes(&cmd), &[0x01, 0x00]);
+
+        let ext_params = LeSetExtendedScanParametersCmd {
+            own_address_type: LE_PUBLIC_ADDRESS,
+            filter_policy: FILTER_POLICY_ACCEPT_ALL,
+            scanning_phys: LE_1M_PHY,
+            scan_type: LE_SCAN_PASSIVE,
+            interval: 0x0140, // 200ms in 0.625ms units
+            window: 0x0140,   // 200ms in 0.625ms units
+        };
+        assert_eq!(
+            as_bytes(&ext_params),
+            &[0x00, 0x00, 0x01, 0x00, 0x40, 0x01, 0x40, 0x01]
+        );
+
+        let ext_enable = LeSetExtendedScanEnableCmd {
+            enable: 1,
+            filter_dup: 0,
+            duration: 0x001E,
+            period: 0x0000,
+        };
+        assert_eq!(as_bytes(&ext_enable), &[0x01, 0x00, 0x1E, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_hci_opcode() {
+        assert_eq!(hci_opcode(OGF_LE_CTL, OCF_LE_SET_SCAN_ENABLE), 0x200C);
     }
 
     #[test]

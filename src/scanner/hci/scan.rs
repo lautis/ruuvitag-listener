@@ -2,16 +2,11 @@
 //! event read loop.
 
 use super::bpf::set_bpf_ruuvi_filter;
-use super::ffi::{
-    bind_hci_socket, configure_le_scan, disable_le_scan, open_hci_socket, set_command_hci_filter,
-    set_hci_filter,
-};
+use super::ffi::{HciSocket, configure_le_scan, disable_le_scan, read_packet};
 use super::parse::{might_be_ruuvi, parse_advertising_report, parse_extended_advertising_report};
 use super::*;
 use crate::scanner::{MEASUREMENT_CHANNEL_BUFFER_SIZE, ScanError, ScanSession};
-use libc::c_void;
 use std::io;
-use std::os::fd::AsRawFd;
 use std::path::Path;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
@@ -101,32 +96,30 @@ pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSe
     };
 
     // Open and configure HCI socket for receiving events
-    let fd = open_hci_socket()?;
-    bind_hci_socket(&fd, dev_id)?;
-    set_hci_filter(&fd)?;
-    set_bpf_ruuvi_filter(&fd)?; // Kernel-level filtering for Ruuvi packets
+    let event_socket = HciSocket::open(dev_id)?;
+    event_socket.set_event_filter()?;
+    set_bpf_ruuvi_filter(&event_socket)?; // Kernel-level filtering for Ruuvi packets
 
     // We need a separate socket for sending commands (bound to specific device).
     // It needs a filter that lets Command Complete events through so we can read
     // back command results and detect Bluetooth 5 extended-advertising support.
-    let cmd_fd = open_hci_socket()?;
-    bind_hci_socket(&cmd_fd, dev_id)?;
-    set_command_hci_filter(&cmd_fd)?;
-    configure_le_scan(&cmd_fd)?;
+    let cmd_socket = HciSocket::open(dev_id)?;
+    cmd_socket.set_command_filter()?;
+    configure_le_scan(&cmd_socket)?;
 
     let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
 
     // Wrap in AsyncFd for async I/O
-    let async_fd = AsyncFd::new(fd)
+    let async_fd = AsyncFd::new(event_socket)
         .map_err(|e| ScanError::Bluetooth(format!("Failed to create async fd: {}", e)))?;
 
     // Spawn a task to read and process HCI events. The task owns the command
     // socket so it can disable the adapter's LE scan on shutdown — closing the
     // raw HCI socket alone does not stop scanning on Linux.
     let task = tokio::spawn(async move {
-        let mut buf = [0u8; 258]; // Max HCI event size
+        let mut buf = [0u8; HCI_EVENT_BUF_SIZE]; // Max HCI event size
 
         loop {
             tokio::select! {
@@ -141,20 +134,7 @@ pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSe
 
                     // Drain all available packets before waiting again
                     loop {
-                        let n = match guard.try_io(|inner| {
-                            let ret = unsafe {
-                                libc::read(
-                                    inner.as_raw_fd(),
-                                    buf.as_mut_ptr() as *mut c_void,
-                                    buf.len(),
-                                )
-                            };
-                            if ret < 0 {
-                                Err(io::Error::last_os_error())
-                            } else {
-                                Ok(ret as usize)
-                            }
-                        }) {
+                        let n = match guard.try_io(|inner| read_packet(inner, &mut buf)) {
                             Ok(Ok(n)) if n > 0 => n,
                             Ok(Ok(_)) => break,  // EOF or empty read
                             Ok(Err(_)) => break, // Read error
@@ -197,7 +177,7 @@ pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSe
         // Tell the controller to stop scanning. Without this the adapter keeps
         // scanning after the process exits, wasting power and interfering with
         // other connections.
-        if let Err(e) = disable_le_scan(&cmd_fd) {
+        if let Err(e) = disable_le_scan(&cmd_socket) {
             eprintln!("failed to disable LE scan: {e}");
         }
     });
