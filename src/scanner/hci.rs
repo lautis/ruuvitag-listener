@@ -6,7 +6,7 @@
 
 use super::{
     DecodeError, MEASUREMENT_CHANNEL_BUFFER_SIZE, MeasurementResult, RSSI_UNAVAILABLE,
-    RUUVI_MANUFACTURER_ID, ScanError, decode_ruuvi_data, with_rssi,
+    RUUVI_MANUFACTURER_ID, ScanError, ScanSession, decode_ruuvi_data, with_rssi,
 };
 use crate::mac_address::MacAddress;
 use libc::{
@@ -19,6 +19,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 // HCI protocol constants
 const BTPROTO_HCI: c_int = 1;
@@ -682,6 +683,19 @@ fn configure_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
     }
 }
 
+/// Disable LE scanning on the controller, matching the mode used to start it.
+///
+/// The controller's feature set determines which disable command it accepts
+/// (legacy vs extended). Both disable paths tolerate "Command Disallowed" for
+/// an already-disabled scan.
+fn disable_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
+    if controller_supports_extended_scan(fd)? {
+        set_extended_scan_enable(fd, false)
+    } else {
+        set_legacy_scan_enable(fd, false)
+    }
+}
+
 /// Configure legacy (Bluetooth 4.x) LE scanning parameters.
 fn configure_legacy_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
     // Setting scan parameters is rejected with "Command Disallowed" while
@@ -979,15 +993,15 @@ fn parse_ruuvi_from_ad_data(ad_data: &[u8], addr: [u8; 6], rssi: i8) -> Option<M
 /// * `adapter` - Kernel adapter name (e.g. "hci1"), or `None` for `hci0`.
 ///
 /// # Returns
-/// A receiver for measurements (or decode errors if verbose).
+/// A scan session whose `measurements` receiver yields measurements (or decode
+/// errors if verbose). Stopping the session (`ScanSession::stop`) makes the
+/// backend send the LE Scan disable command, which is required on Linux to
+/// actually end the adapter's scan.
 ///
 /// # Requirements
 /// - CAP_NET_RAW and CAP_NET_ADMIN capabilities or root privileges
 /// - An available HCI device (typically hci0)
-pub async fn start_scan(
-    verbose: bool,
-    adapter: Option<String>,
-) -> Result<mpsc::Receiver<MeasurementResult>, ScanError> {
+pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSession, ScanError> {
     let dev_id = match adapter {
         Some(name) => resolve_adapter(&name)?,
         None => 0, // default to hci0, as before
@@ -1008,78 +1022,94 @@ pub async fn start_scan(
     configure_le_scan(&cmd_fd)?;
 
     let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
 
     // Wrap in AsyncFd for async I/O
     let async_fd = AsyncFd::new(fd)
         .map_err(|e| ScanError::Bluetooth(format!("Failed to create async fd: {}", e)))?;
 
-    // Spawn a task to read and process HCI events
-    tokio::spawn(async move {
-        let _cmd_fd = cmd_fd; // Keep command socket alive
+    // Spawn a task to read and process HCI events. The task owns the command
+    // socket so it can disable the adapter's LE scan on shutdown — closing the
+    // raw HCI socket alone does not stop scanning on Linux.
+    let task = tokio::spawn(async move {
         let mut buf = [0u8; 258]; // Max HCI event size
 
         loop {
-            // Wait for the socket to be readable
-            let mut guard = match async_fd.readable().await {
-                Ok(guard) => guard,
-                Err(_) => break,
-            };
-
-            // Drain all available packets before waiting again
-            loop {
-                let n = match guard.try_io(|inner| {
-                    let ret = unsafe {
-                        libc::read(
-                            inner.as_raw_fd(),
-                            buf.as_mut_ptr() as *mut c_void,
-                            buf.len(),
-                        )
-                    };
-                    if ret < 0 {
-                        Err(io::Error::last_os_error())
-                    } else {
-                        Ok(ret as usize)
-                    }
-                }) {
-                    Ok(Ok(n)) if n > 0 => n,
-                    Ok(Ok(_)) => break,  // EOF or empty read
-                    Ok(Err(_)) => break, // Read error
-                    Err(_) => break,     // WouldBlock - no more data
-                };
-
-                // Check if this is an LE advertising report that might be from a
-                // RuuviTag. Controllers emit legacy reports (0x02) or, in
-                // extended/Bluetooth 5 mode, extended reports (0x0D).
-                if n >= 4 && buf[0] == HCI_EVENT_PKT && buf[1] == EVT_LE_META_EVENT {
-                    let subevent = buf[3];
-                    // Quick check for Ruuvi manufacturer ID before expensive parsing
-                    let result = if !might_be_ruuvi(&buf[..n]) {
-                        None
-                    } else if subevent == EVT_LE_ADVERTISING_REPORT {
-                        parse_advertising_report(&buf[..n], verbose)
-                    } else if subevent == EVT_LE_EXTENDED_ADVERTISING_REPORT {
-                        parse_extended_advertising_report(&buf[..n], verbose)
-                    } else {
-                        None
+            tokio::select! {
+                // Graceful shutdown requested by the scan session.
+                _ = task_cancel.cancelled() => break,
+                // Wait for the socket to be readable
+                result = async_fd.readable() => {
+                    let mut guard = match result {
+                        Ok(guard) => guard,
+                        Err(_) => break,
                     };
 
-                    if let Some(result) = result {
-                        match &result {
-                            Ok(_) => {
-                                let _ = tx.send(result).await;
+                    // Drain all available packets before waiting again
+                    loop {
+                        let n = match guard.try_io(|inner| {
+                            let ret = unsafe {
+                                libc::read(
+                                    inner.as_raw_fd(),
+                                    buf.as_mut_ptr() as *mut c_void,
+                                    buf.len(),
+                                )
+                            };
+                            if ret < 0 {
+                                Err(io::Error::last_os_error())
+                            } else {
+                                Ok(ret as usize)
                             }
-                            Err(_) if verbose => {
-                                let _ = tx.send(result).await;
+                        }) {
+                            Ok(Ok(n)) if n > 0 => n,
+                            Ok(Ok(_)) => break,  // EOF or empty read
+                            Ok(Err(_)) => break, // Read error
+                            Err(_) => break,     // WouldBlock - no more data
+                        };
+
+                        // Check if this is an LE advertising report that might be from a
+                        // RuuviTag. Controllers emit legacy reports (0x02) or, in
+                        // extended/Bluetooth 5 mode, extended reports (0x0D).
+                        if n >= 4 && buf[0] == HCI_EVENT_PKT && buf[1] == EVT_LE_META_EVENT {
+                            let subevent = buf[3];
+                            // Quick check for Ruuvi manufacturer ID before expensive parsing
+                            let result = if !might_be_ruuvi(&buf[..n]) {
+                                None
+                            } else if subevent == EVT_LE_ADVERTISING_REPORT {
+                                parse_advertising_report(&buf[..n], verbose)
+                            } else if subevent == EVT_LE_EXTENDED_ADVERTISING_REPORT {
+                                parse_extended_advertising_report(&buf[..n], verbose)
+                            } else {
+                                None
+                            };
+
+                            if let Some(result) = result {
+                                match &result {
+                                    Ok(_) => {
+                                        let _ = tx.send(result).await;
+                                    }
+                                    Err(_) if verbose => {
+                                        let _ = tx.send(result).await;
+                                    }
+                                    _ => {}
+                                }
                             }
-                            _ => {}
                         }
                     }
                 }
             }
         }
+
+        // Tell the controller to stop scanning. Without this the adapter keeps
+        // scanning after the process exits, wasting power and interfering with
+        // other connections.
+        if let Err(e) = disable_le_scan(&cmd_fd) {
+            eprintln!("failed to disable LE scan: {e}");
+        }
     });
 
-    Ok(rx)
+    Ok(ScanSession::managed(rx, cancel, task))
 }
 
 #[cfg(test)]

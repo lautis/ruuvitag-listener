@@ -6,7 +6,9 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use ruuvitag_listener::app::{Options, Scanner, run_with_io};
-use ruuvitag_listener::{Backend, MacAddress, MeasurementResult, ScanError, decode_ruuvi_data};
+use ruuvitag_listener::{
+    Backend, MacAddress, MeasurementResult, ScanError, ScanSession, decode_ruuvi_data,
+};
 use std::future::Future;
 use std::hint::black_box;
 use std::pin::Pin;
@@ -66,9 +68,7 @@ impl Scanner for FakeScanner {
         _backend: Backend,
         _verbose: bool,
         _adapter: Option<String>,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<mpsc::Receiver<MeasurementResult>, ScanError>> + Send + '_>,
-    > {
+    ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>> {
         let results = self.results.clone();
         Box::pin(async move {
             let (tx, rx) = mpsc::channel::<MeasurementResult>(results.len().max(1));
@@ -77,7 +77,7 @@ impl Scanner for FakeScanner {
                     let _ = tx.send(r).await;
                 }
             });
-            Ok(rx)
+            Ok(ScanSession::unmanaged(rx))
         })
     }
 }
@@ -111,9 +111,15 @@ fn bench_app_pipeline(c: &mut Criterion) {
             let mut err = Vec::<u8>::new();
 
             rt.block_on(async {
-                run_with_io(options, &scanner, &mut out, &mut err)
-                    .await
-                    .unwrap();
+                run_with_io(
+                    options,
+                    &scanner,
+                    &mut out,
+                    &mut err,
+                    std::future::pending(),
+                )
+                .await
+                .unwrap();
             });
 
             black_box(out)
@@ -130,9 +136,15 @@ fn bench_app_pipeline(c: &mut Criterion) {
             let mut err = Vec::<u8>::new();
 
             rt.block_on(async {
-                run_with_io(options, &scanner, &mut out, &mut err)
-                    .await
-                    .unwrap();
+                run_with_io(
+                    options,
+                    &scanner,
+                    &mut out,
+                    &mut err,
+                    std::future::pending(),
+                )
+                .await
+                .unwrap();
             });
 
             black_box(out)
@@ -164,9 +176,15 @@ fn bench_batch_pipeline(c: &mut Criterion) {
                     let mut err = Vec::<u8>::new();
 
                     rt.block_on(async {
-                        run_with_io(options, &scanner, &mut out, &mut err)
-                            .await
-                            .unwrap();
+                        run_with_io(
+                            options,
+                            &scanner,
+                            &mut out,
+                            &mut err,
+                            std::future::pending(),
+                        )
+                        .await
+                        .unwrap();
                     });
 
                     black_box(out)
@@ -200,9 +218,15 @@ fn bench_throttled_pipeline(c: &mut Criterion) {
             let mut err = Vec::<u8>::new();
 
             rt.block_on(async {
-                run_with_io(options, &scanner, &mut out, &mut err)
-                    .await
-                    .unwrap();
+                run_with_io(
+                    options,
+                    &scanner,
+                    &mut out,
+                    &mut err,
+                    std::future::pending(),
+                )
+                .await
+                .unwrap();
             });
 
             // Verify only 1 line was output (the rest were throttled)
@@ -238,9 +262,15 @@ fn bench_multi_device_pipeline(c: &mut Criterion) {
             let mut err = Vec::<u8>::new();
 
             rt.block_on(async {
-                run_with_io(options, &scanner, &mut out, &mut err)
-                    .await
-                    .unwrap();
+                run_with_io(
+                    options,
+                    &scanner,
+                    &mut out,
+                    &mut err,
+                    std::future::pending(),
+                )
+                .await
+                .unwrap();
             });
 
             black_box(out)

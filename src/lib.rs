@@ -23,5 +23,7 @@ pub use output::OutputFormatter;
 pub use output::csv::CsvFormatter;
 pub use output::influxdb::InfluxDbFormatter;
 pub use output::jsonl::JsonLinesFormatter;
-pub use scanner::{Backend, DecodeError, MeasurementResult, ScanError, decode_ruuvi_data};
+pub use scanner::{
+    Backend, DecodeError, MeasurementResult, ScanError, ScanSession, decode_ruuvi_data,
+};
 pub use throttle::{Throttle, parse_duration};

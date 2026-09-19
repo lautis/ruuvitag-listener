@@ -10,7 +10,7 @@ use crate::output::OutputFormatter;
 use crate::output::csv::CsvFormatter;
 use crate::output::influxdb::InfluxDbFormatter;
 use crate::output::jsonl::JsonLinesFormatter;
-use crate::scanner::{Backend, MeasurementResult, ScanError};
+use crate::scanner::{Backend, ScanError, ScanSession};
 use crate::throttle::Throttle;
 use clap::{Parser, ValueEnum};
 use std::collections::HashSet;
@@ -20,7 +20,6 @@ use std::io::Write;
 use std::pin::Pin;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::mpsc;
 
 /// Output format for measurements.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,9 +89,7 @@ pub trait Scanner: Send + Sync {
         backend: Backend,
         verbose: bool,
         adapter: Option<String>,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<mpsc::Receiver<MeasurementResult>, ScanError>> + Send + '_>,
-    >;
+    ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>>;
 }
 
 /// Real scanner implementation that delegates to the compiled-in backends.
@@ -105,9 +102,7 @@ impl Scanner for RealScanner {
         backend: Backend,
         verbose: bool,
         adapter: Option<String>,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<mpsc::Receiver<MeasurementResult>, ScanError>> + Send + '_>,
-    > {
+    ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>> {
         Box::pin(async move { crate::scanner::start_scan(backend, verbose, adapter).await })
     }
 }
@@ -147,11 +142,15 @@ fn write_measurement(
 ///
 /// - On successful measurements, it optionally applies throttling, formats them, and writes a line to `out`.
 /// - On decode errors, it writes the error to `err` only when `options.verbose` is true.
+/// - When `stop` resolves (e.g. SIGINT/SIGTERM in the binary), the loop ends
+///   and the scan is stopped gracefully so the backend can disable the
+///   adapter's LE scan before the process exits.
 pub async fn run_with_io(
     options: Options,
     scanner: &dyn Scanner,
     out: &mut dyn Write,
     err: &mut dyn Write,
+    stop: impl Future<Output = ()> + Send,
 ) -> Result<(), RunError> {
     let aliases: AliasMap = crate::alias::to_map(&options.aliases);
     let formatter: Box<dyn OutputFormatter> = match options.format {
@@ -169,38 +168,52 @@ pub async fn run_with_io(
     // Devices seen emitting E1, whose redundant V6 frames we drop.
     let mut e1_devices: HashSet<MacAddress> = HashSet::new();
 
-    let mut measurements = scanner
+    let mut session = scanner
         .start_scan(options.backend, options.verbose, options.adapter)
         .await?;
 
-    while let Some(result) = measurements.recv().await {
-        match result {
-            Ok(measurement) => {
-                if is_redundant_v6(&mut e1_devices, &measurement) {
-                    continue;
-                }
+    tokio::pin!(stop);
 
-                let should_emit = throttle
-                    .as_mut()
-                    .is_none_or(|t: &mut Throttle| t.should_emit(measurement.mac));
+    loop {
+        tokio::select! {
+            result = session.measurements.recv() => match result {
+                Some(result) => match result {
+                    Ok(measurement) => {
+                        if is_redundant_v6(&mut e1_devices, &measurement) {
+                            continue;
+                        }
 
-                if should_emit {
-                    let only_aliased = options.only_aliased
-                        && !crate::alias::has_alias(&measurement.mac, &aliases);
-                    if only_aliased {
-                        continue;
+                        let should_emit = throttle
+                            .as_mut()
+                            .is_none_or(|t: &mut Throttle| t.should_emit(measurement.mac));
+
+                        if should_emit {
+                            let only_aliased = options.only_aliased
+                                && !crate::alias::has_alias(&measurement.mac, &aliases);
+                            if only_aliased {
+                                continue;
+                            }
+                            let name = crate::alias::resolve_name(&measurement.mac, &aliases);
+                            write_measurement(&*formatter, &measurement, &name, out)?;
+                        }
                     }
-                    let name = crate::alias::resolve_name(&measurement.mac, &aliases);
-                    write_measurement(&*formatter, &measurement, &name, out)?;
-                }
-            }
-            Err(decode_err) => {
-                if options.verbose {
-                    writeln!(err, "{decode_err}")?;
-                }
-            }
+                    Err(decode_err) => {
+                        if options.verbose {
+                            writeln!(err, "{decode_err}")?;
+                        }
+                    }
+                },
+                // All senders dropped: the scan ended on its own.
+                None => break,
+            },
+            () = &mut stop => break,
         }
     }
+
+    // Graceful shutdown: ask the backend to stop scanning and wait for it to
+    // finish (the HCI backend disables the adapter's LE scan here; the BlueZ
+    // backend ends the discovery session).
+    session.stop().await;
 
     Ok(())
 }
@@ -209,9 +222,10 @@ pub async fn run_with_io(
 mod tests {
     use super::*;
     use crate::mac_address::MacAddress;
-    use crate::scanner::DecodeError;
+    use crate::scanner::{DecodeError, MeasurementResult};
     use std::sync::Mutex;
     use std::time::SystemTime;
+    use tokio::sync::mpsc;
 
     #[derive(Debug)]
     struct FakeScanner {
@@ -232,13 +246,7 @@ mod tests {
             _backend: Backend,
             _verbose: bool,
             _adapter: Option<String>,
-        ) -> Pin<
-            Box<
-                dyn Future<Output = Result<mpsc::Receiver<MeasurementResult>, ScanError>>
-                    + Send
-                    + '_,
-            >,
-        > {
+        ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>> {
             let results = self.results.lock().unwrap().clone();
             Box::pin(async move {
                 let (tx, rx) = mpsc::channel::<MeasurementResult>(results.len().max(1));
@@ -248,7 +256,7 @@ mod tests {
                     }
                     // drop tx to close channel
                 });
-                Ok(rx)
+                Ok(ScanSession::unmanaged(rx))
             })
         }
     }
@@ -287,6 +295,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_ends_cleanly_when_stop_resolves() {
+        // A scanner that never closes the channel: the run loop can only end
+        // via the stop signal.
+        struct InfiniteScanner;
+
+        impl Scanner for InfiniteScanner {
+            fn start_scan(
+                &self,
+                _backend: Backend,
+                _verbose: bool,
+                _adapter: Option<String>,
+            ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>>
+            {
+                Box::pin(async move {
+                    let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
+                    // Keep the sender alive forever so the channel stays open.
+                    tokio::spawn(async move {
+                        let _tx = tx;
+                        std::future::pending::<()>().await;
+                    });
+                    Ok(ScanSession::unmanaged(rx))
+                })
+            }
+        }
+
+        let options = Options {
+            influxdb_measurement: "ruuvi_measurement".to_string(),
+            format: OutputFormat::InfluxDb,
+            aliases: vec![],
+            verbose: false,
+            throttle: None,
+            backend: Backend::Bluer,
+            adapter: None,
+            only_aliased: false,
+        };
+
+        let mut out = Vec::<u8>::new();
+        let mut err = Vec::<u8>::new();
+        // A stop signal that is already resolved: the loop must break
+        // immediately and `run_with_io` must return cleanly.
+        run_with_io(
+            options,
+            &InfiniteScanner,
+            &mut out,
+            &mut err,
+            std::future::ready(()),
+        )
+        .await
+        .unwrap();
+
+        assert!(out.is_empty());
+        assert!(err.is_empty());
+    }
+
+    #[tokio::test]
     async fn run_writes_measurements_to_out() {
         let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
@@ -306,9 +369,15 @@ mod tests {
 
         let mut out = Vec::<u8>::new();
         let mut err = Vec::<u8>::new();
-        run_with_io(options, &scanner, &mut out, &mut err)
-            .await
-            .unwrap();
+        run_with_io(
+            options,
+            &scanner,
+            &mut out,
+            &mut err,
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
 
         assert!(err.is_empty());
 
@@ -340,9 +409,15 @@ mod tests {
 
         let mut out = Vec::<u8>::new();
         let mut err = Vec::<u8>::new();
-        run_with_io(options, &scanner, &mut out, &mut err)
-            .await
-            .unwrap();
+        run_with_io(
+            options,
+            &scanner,
+            &mut out,
+            &mut err,
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
 
         let out = String::from_utf8(out).unwrap();
         // only first should pass (no waiting in test, so second is within interval)
@@ -411,9 +486,15 @@ mod tests {
 
         let mut out = Vec::<u8>::new();
         let mut err = Vec::<u8>::new();
-        run_with_io(options, &scanner, &mut out, &mut err)
-            .await
-            .unwrap();
+        run_with_io(
+            options,
+            &scanner,
+            &mut out,
+            &mut err,
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
 
         let out = String::from_utf8(out).unwrap();
         assert_eq!(out.lines().count(), 2);
@@ -445,9 +526,15 @@ mod tests {
 
         let mut out = Vec::<u8>::new();
         let mut err = Vec::<u8>::new();
-        run_with_io(options, &scanner, &mut out, &mut err)
-            .await
-            .unwrap();
+        run_with_io(
+            options,
+            &scanner,
+            &mut out,
+            &mut err,
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
 
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("name=Sauna"));
@@ -475,9 +562,15 @@ mod tests {
         // non-verbose: nothing written
         let mut out = Vec::<u8>::new();
         let mut err = Vec::<u8>::new();
-        run_with_io(base.clone(), &scanner, &mut out, &mut err)
-            .await
-            .unwrap();
+        run_with_io(
+            base.clone(),
+            &scanner,
+            &mut out,
+            &mut err,
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
         assert!(out.is_empty());
         assert!(err.is_empty());
 
@@ -486,9 +579,15 @@ mod tests {
         let mut err = Vec::<u8>::new();
         let mut verbose = base;
         verbose.verbose = true;
-        run_with_io(verbose, &scanner, &mut out, &mut err)
-            .await
-            .unwrap();
+        run_with_io(
+            verbose,
+            &scanner,
+            &mut out,
+            &mut err,
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
 
         assert!(out.is_empty());
         let err = String::from_utf8(err).unwrap();
@@ -515,9 +614,15 @@ mod tests {
 
         let mut out = Vec::<u8>::new();
         let mut err = Vec::<u8>::new();
-        run_with_io(options, &scanner, &mut out, &mut err)
-            .await
-            .unwrap();
+        run_with_io(
+            options,
+            &scanner,
+            &mut out,
+            &mut err,
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
 
         let out = String::from_utf8(out).unwrap();
         let mut lines = out.lines();
@@ -548,9 +653,15 @@ mod tests {
 
         let mut out = Vec::<u8>::new();
         let mut err = Vec::<u8>::new();
-        run_with_io(options, &scanner, &mut out, &mut err)
-            .await
-            .unwrap();
+        run_with_io(
+            options,
+            &scanner,
+            &mut out,
+            &mut err,
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
 
         let out = String::from_utf8(out).unwrap();
         let line = out.trim_end();
