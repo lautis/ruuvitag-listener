@@ -3,11 +3,12 @@
 //! Isolates formatter performance from async runtime overhead to enable
 //! precise measurement and optimization of the formatting logic.
 
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use ruuvitag_listener::{
     AliasMap, Format, InfluxDbFormatter, MacAddress, Measurement, OutputFormatter, resolve_name,
 };
 use std::collections::HashMap;
+use std::hint::black_box;
 use std::time::SystemTime;
 
 const TEST_MAC: MacAddress = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);

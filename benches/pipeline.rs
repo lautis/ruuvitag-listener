@@ -4,10 +4,11 @@
 //! integration tests in app.rs - with a FakeScanner feeding measurements
 //! through run_with_io.
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use ruuvitag_listener::app::{Options, Scanner, run_with_io};
 use ruuvitag_listener::{Backend, MacAddress, MeasurementResult, ScanError, decode_ruuvi_data};
 use std::future::Future;
+use std::hint::black_box;
 use std::pin::Pin;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
@@ -86,6 +87,7 @@ fn default_options() -> Options {
         influxdb_measurement: "ruuvi_measurement".to_string(),
         format: ruuvitag_listener::app::OutputFormat::InfluxDb,
         aliases: vec![],
+        only_aliased: false,
         verbose: false,
         throttle: None,
         backend: Backend::Bluer,
