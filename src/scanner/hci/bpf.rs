@@ -309,80 +309,104 @@ mod tests {
         }
     }
 
-    /// Build an HCI advertising report with the 16-bit Ruuvi manufacturer ID
-    /// (bytes 0x99 0x04 on the wire, matching [`RUUVI_ID_BE`] read
-    /// big-endian) placed at `id_off`. Every other payload byte is zeroed so
-    /// no other offset can match the ID.
-    fn advertising_report(subevent: u8, id_off: usize) -> Vec<u8> {
+    /// Ruuvi manufacturer ID as it appears on the wire: bytes 0x99 0x04,
+    /// big-endian.
+    const RUUVI_ID_WIRE: [u8; 2] = {
+        let bytes = RUUVI_ID_BE.to_be_bytes();
+        [bytes[2], bytes[3]]
+    };
+
+    /// Build an HCI advertising report with a manufacturer ID at `id_off`.
+    /// Every other payload byte is zeroed so no other offset can match.
+    fn advertising_report(subevent: u8, id_off: usize, id: [u8; 2]) -> Vec<u8> {
         let mut pkt = vec![0u8; 80];
         pkt[0] = HCI_EVENT_PKT;
         pkt[1] = EVT_LE_META_EVENT;
         pkt[2] = (pkt.len() - 4) as u8; // parameter length
         pkt[3] = subevent;
         pkt[4] = 1; // num reports
-        pkt[id_off] = 0x99;
-        pkt[id_off + 1] = 0x04;
+        pkt[id_off..id_off + 2].copy_from_slice(&id);
         pkt
+    }
+
+    /// Whether the Ruuvi filter keeps `pkt` — the test view of `run_bpf`'s
+    /// byte-count verdict.
+    fn kept(pkt: &[u8]) -> bool {
+        run_bpf(&ruuvi_bpf_program(), pkt) != 0
     }
 
     #[test]
     fn test_filter_accepts_legacy_ruuvi_report() {
         // Legacy report: AD data starts at offset 14, so a real RuuviTag's
         // manufacturer ID (after the AD length and type bytes) sits at 16.
-        let prog = ruuvi_bpf_program();
-        let pkt = advertising_report(EVT_LE_ADVERTISING_REPORT, 16);
-        assert_eq!(run_bpf(&prog, &pkt), 0xFFFF);
+        assert!(kept(&advertising_report(
+            EVT_LE_ADVERTISING_REPORT,
+            16,
+            RUUVI_ID_WIRE
+        )));
     }
 
     #[test]
     fn test_filter_accepts_extended_ruuvi_report() {
         // Extended report: the per-report header is 25 bytes, so AD data
         // starts at offset 29 and the manufacturer ID follows at 31.
-        let prog = ruuvi_bpf_program();
-        let pkt = advertising_report(EVT_LE_EXTENDED_ADVERTISING_REPORT, 31);
-        assert_eq!(run_bpf(&prog, &pkt), 0xFFFF);
+        assert!(kept(&advertising_report(
+            EVT_LE_EXTENDED_ADVERTISING_REPORT,
+            31,
+            RUUVI_ID_WIRE
+        )));
     }
 
     #[test]
     fn test_filter_accepts_id_at_every_scanned_offset() {
-        let prog = ruuvi_bpf_program();
         for off in FIRST_OFFSET..=LAST_OFFSET {
-            let pkt = advertising_report(EVT_LE_ADVERTISING_REPORT, off as usize);
-            assert_eq!(run_bpf(&prog, &pkt), 0xFFFF, "ID at byte {off} dropped");
+            assert!(
+                kept(&advertising_report(
+                    EVT_LE_ADVERTISING_REPORT,
+                    off as usize,
+                    RUUVI_ID_WIRE
+                )),
+                "ID at byte {off} dropped"
+            );
         }
     }
 
     #[test]
     fn test_filter_rejects_id_outside_scanned_window() {
-        let prog = ruuvi_bpf_program();
         for off in [FIRST_OFFSET - 1, LAST_OFFSET + 1, LAST_OFFSET + 2] {
-            let pkt = advertising_report(EVT_LE_ADVERTISING_REPORT, off as usize);
-            assert_eq!(run_bpf(&prog, &pkt), 0, "ID at byte {off} kept");
+            assert!(
+                !kept(&advertising_report(
+                    EVT_LE_ADVERTISING_REPORT,
+                    off as usize,
+                    RUUVI_ID_WIRE
+                )),
+                "ID at byte {off} kept"
+            );
         }
     }
 
     #[test]
     fn test_filter_rejects_non_ruuvi_packets() {
-        let prog = ruuvi_bpf_program();
+        // A valid advertising report carrying a different manufacturer ID at
+        // the Ruuvi position is dropped.
+        assert!(!kept(&advertising_report(
+            EVT_LE_ADVERTISING_REPORT,
+            16,
+            [0x12, 0x34]
+        )));
 
-        // A valid advertising report carrying a different manufacturer ID.
-        let mut pkt = advertising_report(EVT_LE_ADVERTISING_REPORT, 16);
-        pkt[16] = 0x12;
-        pkt[17] = 0x34;
-        assert_eq!(run_bpf(&prog, &pkt), 0);
-
-        // Wrong packet type, event code, or subevent never reaches the ID
-        // checks, regardless of where the ID bytes land.
-        let mut pkt = advertising_report(EVT_LE_ADVERTISING_REPORT, 16);
+        // Wrong packet type or event code never reaches the ID checks,
+        // regardless of where the ID bytes land.
+        let mut pkt = advertising_report(EVT_LE_ADVERTISING_REPORT, 16, RUUVI_ID_WIRE);
         pkt[0] = 0x02;
-        assert_eq!(run_bpf(&prog, &pkt), 0);
+        assert!(!kept(&pkt));
 
-        let mut pkt = advertising_report(EVT_LE_ADVERTISING_REPORT, 16);
+        let mut pkt = advertising_report(EVT_LE_ADVERTISING_REPORT, 16, RUUVI_ID_WIRE);
         pkt[1] = 0x05;
-        assert_eq!(run_bpf(&prog, &pkt), 0);
+        assert!(!kept(&pkt));
 
-        let pkt = advertising_report(0x0B, 16);
-        assert_eq!(run_bpf(&prog, &pkt), 0);
+        // An unknown subevent is never decoded as an advertising report.
+        assert!(!kept(&advertising_report(0x0B, 16, RUUVI_ID_WIRE)));
     }
 
     #[test]
