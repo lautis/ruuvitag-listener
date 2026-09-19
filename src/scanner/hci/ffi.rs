@@ -385,64 +385,126 @@ fn controller_supports_extended_scan(fd: &HciSocket) -> Result<bool, ScanError> 
     }
 }
 
+/// Which LE scan command family to use: legacy (Bluetooth 4.x) vs extended
+/// (Bluetooth 5.x). Extended controllers only report advertisements via
+/// Extended Advertising Reports, so they must be driven with the extended
+/// commands.
+#[derive(Clone, Copy)]
+enum ScanMode {
+    Legacy,
+    Extended,
+}
+
+impl ScanMode {
+    /// Choose the mode for this controller from its LE feature query.
+    fn for_controller(fd: &HciSocket) -> Result<Self, ScanError> {
+        if controller_supports_extended_scan(fd)? {
+            Ok(Self::Extended)
+        } else {
+            Ok(Self::Legacy)
+        }
+    }
+
+    /// OCF of the matching LE Set Scan Parameters command.
+    fn set_params_ocf(self) -> u16 {
+        match self {
+            Self::Legacy => OCF_LE_SET_SCAN_PARAMETERS,
+            Self::Extended => OCF_LE_SET_EXTENDED_SCAN_PARAMETERS,
+        }
+    }
+
+    /// OCF of the matching LE Set Scan Enable command.
+    fn enable_ocf(self) -> u16 {
+        match self {
+            Self::Legacy => OCF_LE_SET_SCAN_ENABLE,
+            Self::Extended => OCF_LE_SET_EXTENDED_SCAN_ENABLE,
+        }
+    }
+
+    /// Wire bytes for LE Set Scan Parameters: passive scan, 200ms interval,
+    /// 200ms window, public address, accept-all policy. The extended variant
+    /// carries one PHY block (LE 1M).
+    fn set_params_bytes(self) -> Vec<u8> {
+        match self {
+            Self::Legacy => as_bytes(&LeSetScanParametersCmd {
+                scan_type: LE_SCAN_PASSIVE,
+                interval: 0x0140, // 200ms in 0.625ms units (0x140 = 320 * 0.625ms)
+                window: 0x0140,   // 200ms in 0.625ms units (0x140 = 320 * 0.625ms)
+                own_address_type: LE_PUBLIC_ADDRESS,
+                filter_policy: FILTER_POLICY_ACCEPT_ALL,
+            })
+            .to_vec(),
+            Self::Extended => as_bytes(&LeSetExtendedScanParametersCmd {
+                own_address_type: LE_PUBLIC_ADDRESS,
+                filter_policy: FILTER_POLICY_ACCEPT_ALL,
+                scanning_phys: LE_1M_PHY,
+                scan_type: LE_SCAN_PASSIVE,
+                interval: 0x0140, // 200ms in 0.625ms units
+                window: 0x0140,   // 200ms in 0.625ms units
+            })
+            .to_vec(),
+        }
+    }
+
+    /// Wire bytes for LE Set Scan Enable; the extended variant adds the
+    /// duration/period fields (both zero for continuous scanning).
+    fn enable_bytes(self, enable: bool) -> Vec<u8> {
+        match self {
+            Self::Legacy => as_bytes(&LeSetScanEnableCmd {
+                enable: enable as u8,
+                filter_dup: 0x00, // Don't filter duplicates
+            })
+            .to_vec(),
+            Self::Extended => as_bytes(&LeSetExtendedScanEnableCmd {
+                enable: enable as u8,
+                filter_dup: 0x00, // Don't filter duplicates
+                duration: 0x0000,
+                period: 0x0000,
+            })
+            .to_vec(),
+        }
+    }
+}
+
+/// Disable any active scan, set scan parameters, then enable scanning.
+///
+/// The initial disable is required because setting scan parameters is rejected
+/// with "Command Disallowed" while a scan is active (e.g. bluetoothd is running
+/// a discovery). Disabling an already-disabled scan is a no-op that some
+/// controllers reject with "Command Disallowed" (e.g. Broadcom BCM43455); the
+/// disable path tolerates that status (see [`scan_enable_status_ok`]).
+fn configure_scan(fd: &HciSocket, mode: ScanMode) -> Result<(), ScanError> {
+    set_scan_enable(fd, mode, false)?;
+    let params = mode.set_params_bytes();
+    fd.command_checked(OGF_LE_CTL, mode.set_params_ocf(), &params)?;
+    set_scan_enable(fd, mode, true)
+}
+
+/// Enable or disable LE scanning, tolerating "Command Disallowed" when
+/// disabling an already-disabled scan.
+fn set_scan_enable(fd: &HciSocket, mode: ScanMode, enable: bool) -> Result<(), ScanError> {
+    let opcode = hci_opcode(OGF_LE_CTL, mode.enable_ocf());
+    let (status, _event) = fd.command(OGF_LE_CTL, mode.enable_ocf(), &mode.enable_bytes(enable))?;
+    if !scan_enable_status_ok(enable, status) {
+        return Err(ScanError::Bluetooth(format!(
+            "HCI command {opcode:#06x} failed with status {status:#04x}"
+        )));
+    }
+    Ok(())
+}
+
 /// Configure LE scanning, preferring extended scanning when the controller
 /// supports it.
 pub(crate) fn configure_le_scan(fd: &HciSocket) -> Result<(), ScanError> {
-    if controller_supports_extended_scan(fd)? {
-        configure_extended_le_scan(fd)
-    } else {
-        configure_legacy_le_scan(fd)
-    }
+    configure_scan(fd, ScanMode::for_controller(fd)?)
 }
 
 /// Disable LE scanning on the controller, matching the mode used to start it.
 ///
 /// The controller's feature set determines which disable command it accepts
-/// (legacy vs extended). Both disable paths tolerate "Command Disallowed" for
-/// an already-disabled scan.
+/// (legacy vs extended).
 pub(crate) fn disable_le_scan(fd: &HciSocket) -> Result<(), ScanError> {
-    if controller_supports_extended_scan(fd)? {
-        set_extended_scan_enable(fd, false)
-    } else {
-        set_legacy_scan_enable(fd, false)
-    }
-}
-
-/// Configure legacy (Bluetooth 4.x) LE scanning parameters.
-fn configure_legacy_le_scan(fd: &HciSocket) -> Result<(), ScanError> {
-    // Setting scan parameters is rejected with "Command Disallowed" while
-    // scanning is already active (e.g. bluetoothd is running a discovery), so
-    // disable scanning first. Disabling an already-disabled scan is a no-op
-    // that some controllers reject with "Command Disallowed"; that status is
-    // tolerated on the disable path.
-    set_legacy_scan_enable(fd, false)?;
-
-    // Set scan parameters: passive scan, 200ms interval, 200ms window
-    // Using longer intervals reduces CPU usage significantly while still
-    // catching RuuviTag broadcasts (which occur every ~1 second)
-    let params = LeSetScanParametersCmd {
-        scan_type: LE_SCAN_PASSIVE,
-        interval: 0x0140, // 200ms in 0.625ms units (0x140 = 320 * 0.625ms)
-        window: 0x0140,   // 200ms in 0.625ms units (0x140 = 320 * 0.625ms)
-        own_address_type: LE_PUBLIC_ADDRESS,
-        filter_policy: FILTER_POLICY_ACCEPT_ALL,
-    };
-
-    fd.command_checked(OGF_LE_CTL, OCF_LE_SET_SCAN_PARAMETERS, as_bytes(&params))?;
-
-    set_legacy_scan_enable(fd, true)?;
-
-    Ok(())
-}
-
-/// Enable or disable legacy LE scanning.
-fn set_legacy_scan_enable(fd: &HciSocket, enable: bool) -> Result<(), ScanError> {
-    let cmd = LeSetScanEnableCmd {
-        enable: enable as u8,
-        filter_dup: 0x00, // Don't filter duplicates
-    };
-
-    send_scan_enable(fd, OCF_LE_SET_SCAN_ENABLE, as_bytes(&cmd), enable)
+    set_scan_enable(fd, ScanMode::for_controller(fd)?, false)
 }
 
 /// Whether a returned status is acceptable for an LE scan enable/disable
@@ -453,70 +515,6 @@ fn set_legacy_scan_enable(fd: &HciSocket, enable: bool) -> Result<(), ScanError>
 /// tolerated when disabling.
 fn scan_enable_status_ok(enable: bool, status: u8) -> bool {
     status == 0 || (!enable && status == HCI_ERR_COMMAND_DISALLOWED)
-}
-
-/// Send an LE scan enable/disable command, tolerating `Command Disallowed`
-/// when disabling an already-disabled scan.
-fn send_scan_enable(
-    fd: &HciSocket,
-    ocf: u16,
-    params: &[u8],
-    enable: bool,
-) -> Result<(), ScanError> {
-    let opcode = hci_opcode(OGF_LE_CTL, ocf);
-    let (status, _event) = fd.command(OGF_LE_CTL, ocf, params)?;
-    if !scan_enable_status_ok(enable, status) {
-        return Err(ScanError::Bluetooth(format!(
-            "HCI command {opcode:#06x} failed with status {status:#04x}"
-        )));
-    }
-    Ok(())
-}
-
-/// Configure extended (Bluetooth 5.x) LE scanning parameters.
-///
-/// Mirrors the legacy configuration (passive scan, 200ms interval/window on the
-/// LE 1M PHY) using the extended scan commands. Controllers that have been put
-/// into extended mode only report advertisements via Extended Advertising
-/// Reports, so the legacy `LE Set Scan Enable` command would be rejected.
-fn configure_extended_le_scan(fd: &HciSocket) -> Result<(), ScanError> {
-    // Setting scan parameters is rejected with "Command Disallowed" while
-    // scanning is already active (e.g. bluetoothd is running a discovery), so
-    // disable scanning first. Disabling an already-disabled scan is a no-op
-    // that some controllers reject with "Command Disallowed"; that status is
-    // tolerated on the disable path.
-    set_extended_scan_enable(fd, false)?;
-
-    let params = LeSetExtendedScanParametersCmd {
-        own_address_type: LE_PUBLIC_ADDRESS,
-        filter_policy: FILTER_POLICY_ACCEPT_ALL,
-        scanning_phys: LE_1M_PHY,
-        scan_type: LE_SCAN_PASSIVE,
-        interval: 0x0140, // 200ms in 0.625ms units
-        window: 0x0140,   // 200ms in 0.625ms units
-    };
-
-    fd.command_checked(
-        OGF_LE_CTL,
-        OCF_LE_SET_EXTENDED_SCAN_PARAMETERS,
-        as_bytes(&params),
-    )?;
-
-    set_extended_scan_enable(fd, true)?;
-
-    Ok(())
-}
-
-/// Enable or disable extended LE scanning (continuous: duration = period = 0).
-fn set_extended_scan_enable(fd: &HciSocket, enable: bool) -> Result<(), ScanError> {
-    let cmd = LeSetExtendedScanEnableCmd {
-        enable: enable as u8,
-        filter_dup: 0x00, // Don't filter duplicates
-        duration: 0x0000,
-        period: 0x0000,
-    };
-
-    send_scan_enable(fd, OCF_LE_SET_EXTENDED_SCAN_ENABLE, as_bytes(&cmd), enable)
 }
 
 #[cfg(test)]
@@ -590,5 +588,50 @@ mod tests {
         assert!(!scan_enable_status_ok(true, HCI_ERR_COMMAND_DISALLOWED));
         // Other errors are never tolerated.
         assert!(!scan_enable_status_ok(false, 0x0f));
+    }
+
+    #[test]
+    fn test_scan_mode_bytes() {
+        // Legacy LE Set Scan Parameters: scan_type=passive, 200ms interval and
+        // window, public address, accept-all filter policy (7 bytes).
+        assert_eq!(
+            ScanMode::Legacy.set_params_bytes(),
+            vec![0x00, 0x40, 0x01, 0x40, 0x01, 0x00, 0x00]
+        );
+        // Extended adds one PHY block (scanning_phys = LE 1M) (8 bytes).
+        assert_eq!(
+            ScanMode::Extended.set_params_bytes(),
+            vec![0x00, 0x00, 0x01, 0x00, 0x40, 0x01, 0x40, 0x01]
+        );
+
+        // Legacy LE Set Scan Enable is 2 bytes; the extended variant adds the
+        // duration/period fields (both zero for continuous scanning).
+        assert_eq!(ScanMode::Legacy.enable_bytes(true), vec![0x01, 0x00]);
+        assert_eq!(ScanMode::Legacy.enable_bytes(false), vec![0x00, 0x00]);
+        assert_eq!(
+            ScanMode::Extended.enable_bytes(true),
+            vec![0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(
+            ScanMode::Extended.enable_bytes(false),
+            vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn test_scan_mode_ocfs() {
+        assert_eq!(
+            ScanMode::Legacy.set_params_ocf(),
+            OCF_LE_SET_SCAN_PARAMETERS
+        );
+        assert_eq!(
+            ScanMode::Extended.set_params_ocf(),
+            OCF_LE_SET_EXTENDED_SCAN_PARAMETERS
+        );
+        assert_eq!(ScanMode::Legacy.enable_ocf(), OCF_LE_SET_SCAN_ENABLE);
+        assert_eq!(
+            ScanMode::Extended.enable_ocf(),
+            OCF_LE_SET_EXTENDED_SCAN_ENABLE
+        );
     }
 }
