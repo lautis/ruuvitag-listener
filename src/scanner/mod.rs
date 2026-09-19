@@ -18,7 +18,66 @@ use ruuvi_sensor_protocol::{
 };
 use std::time::SystemTime;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
+
+/// A running BLE scan: the measurement stream plus graceful-stop plumbing.
+///
+/// `start_scan` returns one of these. The backend owns the adapter state
+/// (raw HCI sockets or the BlueZ discovery session) inside a spawned task;
+/// [`ScanSession::stop`](Self::stop) asks that task to stop scanning and
+/// waits for it to complete any cleanup (e.g. disabling the adapter's LE
+/// scan) before returning.
+///
+/// Dropping a session without calling `stop` lets the backend task run until
+/// the process exits, in which case the OS reclaims the sockets. For the HCI
+/// backend this leaves the adapter scanning, so prefer an explicit `stop`.
+pub struct ScanSession {
+    /// Receiver for measurements (or decode errors when verbose).
+    pub measurements: mpsc::Receiver<MeasurementResult>,
+    /// Signal sent to the backend task to stop scanning gracefully.
+    stop: Option<oneshot::Sender<()>>,
+    /// Join handle for the backend task.
+    task: Option<JoinHandle<()>>,
+}
+
+impl ScanSession {
+    /// Wrap a scan managed by a backend task.
+    ///
+    /// `stop` informs the task that the scan should end; the task is expected
+    /// to disable the adapter's scan (and do any other cleanup) before
+    /// finishing.
+    pub fn managed(
+        measurements: mpsc::Receiver<MeasurementResult>,
+        stop: oneshot::Sender<()>,
+        task: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            measurements,
+            stop: Some(stop),
+            task: Some(task),
+        }
+    }
+
+    /// Wrap a bare receiver with no managed scan (used in tests).
+    pub fn unmanaged(measurements: mpsc::Receiver<MeasurementResult>) -> Self {
+        Self {
+            measurements,
+            stop: None,
+            task: None,
+        }
+    }
+
+    /// Ask the backend to stop scanning and wait until its cleanup completes.
+    pub async fn stop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
 
 /// Error types for decoding RuuviTag data.
 #[derive(Error, Debug, Clone, PartialEq)]
@@ -258,12 +317,14 @@ pub fn decode_ruuvi_data(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
 /// * `adapter` - Bluetooth adapter name (e.g. "hci0"), or `None` for the backend default.
 ///
 /// # Returns
-/// A receiver for measurements (or decode errors if verbose).
+/// A scan session whose `measurements` receiver yields measurements (or decode
+/// errors if verbose). The session can be stopped with
+/// [`ScanSession::stop`], which lets the backend disable the adapter's scan.
 pub async fn start_scan(
     backend: Backend,
     verbose: bool,
     adapter: Option<String>,
-) -> Result<mpsc::Receiver<MeasurementResult>, ScanError> {
+) -> Result<ScanSession, ScanError> {
     match backend {
         #[cfg(feature = "bluer")]
         Backend::Bluer => bluer::start_scan(verbose, adapter).await,

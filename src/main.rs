@@ -1,7 +1,12 @@
 use clap::Parser;
+use std::future::Future;
 use std::panic::{self, PanicHookInfo};
+use std::sync::Arc;
 
 use ruuvitag_listener::app::{Options, RealScanner, RunError, run_with_io};
+#[cfg(unix)]
+use tokio::signal::unix::{SignalKind, signal as unix_signal};
+use tokio::sync::Notify;
 
 /// Exit codes for the application
 const EXIT_SUCCESS: i32 = 0;
@@ -17,16 +22,37 @@ const EXIT_PANIC: i32 = 2;
 /// 4. Starts the BLE scanner
 /// 5. Processes measurements and outputs them to stdout until interrupted
 ///
+/// On SIGINT (Ctrl-C) or SIGTERM, `stop` resolves and the run loop ends,
+/// giving the scanner backend a chance to disable the adapter's LE scan
+/// before the process exits.
+///
 /// # Arguments
-/// * `options` - Command-line options parsed from user input
+/// * `run_options` - Command-line options parsed from user input
+/// * `stop` - Future resolving when a termination signal is received
 ///
 /// # Errors
 /// Returns `ScanError` if Bluetooth initialization fails
-async fn run(run_options: Options) -> Result<(), RunError> {
+async fn run(run_options: Options, stop: impl Future<Output = ()> + Send) -> Result<(), RunError> {
     let scanner = RealScanner;
     let mut out = std::io::stdout();
     let mut err = std::io::stderr();
-    run_with_io(run_options, &scanner, &mut out, &mut err).await
+    run_with_io(run_options, &scanner, &mut out, &mut err, stop).await
+}
+
+/// Wait for SIGTERM (Unix only). On platforms without Unix signals, never
+/// resolves so Ctrl-C remains the only way to stop the process.
+#[cfg(unix)]
+async fn wait_for_sigterm() {
+    if let Ok(mut sigterm) = unix_signal(SignalKind::terminate()) {
+        sigterm.recv().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_sigterm() {
+    std::future::pending::<()>().await;
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -40,7 +66,22 @@ async fn main() {
 
     let options = Options::parse();
 
-    match run(options).await {
+    // Graceful shutdown: on SIGINT (Ctrl-C) or SIGTERM, stop reading
+    // measurements. `run_with_io` then stops the scan so the HCI backend can
+    // tell the adapter to disable its LE scan (closing the socket alone does
+    // not stop scanning) and the BlueZ backend can end discovery.
+    let shutdown = Arc::new(Notify::new());
+    let signal_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = wait_for_sigterm() => {}
+        }
+        eprintln!("received termination signal, stopping scan");
+        signal_shutdown.notify_one();
+    });
+
+    match run(options, shutdown.notified()).await {
         Ok(_) => std::process::exit(EXIT_SUCCESS),
         Err(why) => {
             eprintln!("error: {}", why);

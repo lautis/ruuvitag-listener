@@ -5,12 +5,12 @@
 
 use super::{
     DecodeError, MEASUREMENT_CHANNEL_BUFFER_SIZE, MeasurementResult, RUUVI_MANUFACTURER_ID,
-    ScanError, decode_ruuvi_data,
+    ScanError, ScanSession, decode_ruuvi_data,
 };
 use crate::mac_address::MacAddress;
 use bluer::{Adapter, AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport, Session};
 use futures::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 impl From<bluer::Error> for ScanError {
     fn from(err: bluer::Error) -> Self {
@@ -29,11 +29,14 @@ impl From<bluer::Error> for ScanError {
 /// * `adapter_name` - Kernel adapter name (e.g. "hci0"), or `None` for BlueZ's default adapter.
 ///
 /// # Returns
-/// A receiver for measurements (or decode errors if verbose).
+/// A scan session whose `measurements` receiver yields measurements (or decode
+/// errors if verbose). Stopping the session (`ScanSession::stop`) ends the
+/// discovery stream, which makes bluer drop its discovery session token and
+/// tell BlueZ to stop discovery on the adapter.
 pub async fn start_scan(
     verbose: bool,
     adapter_name: Option<String>,
-) -> Result<mpsc::Receiver<MeasurementResult>, ScanError> {
+) -> Result<ScanSession, ScanError> {
     let session = Session::new().await?;
     let adapter = match adapter_name {
         Some(name) => {
@@ -61,6 +64,7 @@ pub async fn start_scan(
         .await?;
 
     let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
+    let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
 
     // `discover_devices_with_changes` re-emits a `DeviceAdded` event for a
     // device each time its properties change, giving us one notification per
@@ -69,30 +73,43 @@ pub async fn start_scan(
     let mut events = adapter.discover_devices_with_changes().await?;
 
     // Spawn a task that owns all Bluetooth state and runs the event loop
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         // Keep the session alive by moving it into this task
         let _session = session;
 
-        while let Some(event) = events.next().await {
-            if let AdapterEvent::DeviceAdded(address) = event
-                && let Err(e) = process_device(&adapter, address, &tx, verbose).await
-                && verbose
-            {
-                let err = match e {
-                    ScanError::Bluetooth(e) => {
-                        DecodeError::InvalidData(format!("Bluetooth error: {e}"))
+        loop {
+            tokio::select! {
+                // Graceful shutdown requested by the scan session.
+                _ = &mut stop_rx => break,
+                event = events.next() => match event {
+                    Some(AdapterEvent::DeviceAdded(address)) => {
+                        if let Err(e) = process_device(&adapter, address, &tx, verbose).await
+                            && verbose
+                        {
+                            let err = match e {
+                                ScanError::Bluetooth(e) => {
+                                    DecodeError::InvalidData(format!("Bluetooth error: {e}"))
+                                }
+                                ScanError::Decode(e) => e,
+                                ScanError::BackendNotAvailable(e) => {
+                                    DecodeError::InvalidData(format!("Backend not available: {e}"))
+                                }
+                            };
+                            let _ = tx.send(Err(err)).await;
+                        }
                     }
-                    ScanError::Decode(e) => e,
-                    ScanError::BackendNotAvailable(e) => {
-                        DecodeError::InvalidData(format!("Backend not available: {e}"))
-                    }
-                };
-                let _ = tx.send(Err(err)).await;
+                    Some(_) => {}
+                    // Discovery stream ended on its own.
+                    None => break,
+                },
             }
         }
+
+        // Dropping `events` ends the bluer discovery session, which makes
+        // BlueZ stop discovery on the adapter.
     });
 
-    Ok(rx)
+    Ok(ScanSession::managed(rx, stop_tx, task))
 }
 
 /// Process a discovered Bluetooth device and extract RuuviTag measurements.
