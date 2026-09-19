@@ -230,9 +230,8 @@ mod tests {
         num_reports: u8,
         /// AD data length the report claims; `None` sizes it to the real bytes.
         data_len: Option<u8>,
-        /// Raw AD structures carried by the report; `None` builds a single
-        /// well-formed Ruuvi manufacturer entry ([`RUUVI_AD`]).
-        ad: Option<&'static [u8]>,
+        /// Raw AD structures carried by the report ([`RUUVI_AD`] by default).
+        ad: &'static [u8],
         /// RSSI byte: trailing the data (legacy) or in the header (extended).
         rssi: u8,
     }
@@ -244,7 +243,7 @@ mod tests {
                 event_code: EVT_LE_META_EVENT,
                 num_reports: 1,
                 data_len: None,
-                ad: Some(RUUVI_AD),
+                ad: RUUVI_AD,
                 rssi: 0xB0,
             }
         }
@@ -258,7 +257,7 @@ mod tests {
     /// the AD tail are built once here.
     fn report(spec: ReportSpec) -> Vec<u8> {
         let extended = spec.subevent == EVT_LE_EXTENDED_ADVERTISING_REPORT;
-        let ad = spec.ad.unwrap_or(RUUVI_AD);
+        let ad = spec.ad;
         let data_len = spec.data_len.unwrap_or(ad.len() as u8);
         let mut pkt = vec![HCI_EVENT_PKT, spec.event_code, 0x00, spec.subevent];
         pkt.push(spec.num_reports);
@@ -296,6 +295,36 @@ mod tests {
         pkt
     }
 
+    /// Assert `result` is the fixture's RuuviTag — its address reversed from
+    /// the little-endian wire bytes 01..06 — carrying `rssi`.
+    fn assert_ruuvi_decode(result: Option<MeasurementResult>, rssi: Option<i8>) {
+        let measurement = result
+            .expect("expected a report")
+            .expect("payload should decode");
+        assert_eq!(
+            measurement.mac,
+            MacAddress([0x06, 0x05, 0x04, 0x03, 0x02, 0x01])
+        );
+        assert_eq!(measurement.rssi, rssi);
+    }
+
+    /// Assert a parser reports "Advertising report too short" for `pkt` in
+    /// verbose mode. All the parsers share the `(&[u8], bool)` signature.
+    fn assert_too_short(parse: fn(&[u8], bool) -> Option<MeasurementResult>, pkt: &[u8]) {
+        assert_eq!(
+            parse(pkt, true),
+            Some(Err(DecodeError::InvalidData(
+                "Advertising report too short".into()
+            )))
+        );
+    }
+
+    /// Assert a parser drops `pkt` in both verbosity modes.
+    fn assert_silent(parse: fn(&[u8], bool) -> Option<MeasurementResult>, pkt: &[u8]) {
+        assert!(parse(pkt, false).is_none());
+        assert!(parse(pkt, true).is_none());
+    }
+
     #[test]
     fn test_parse_extended_advertising_report() {
         let pkt = report(ReportSpec {
@@ -304,30 +333,19 @@ mod tests {
             ..Default::default()
         });
         assert!(might_be_ruuvi(&pkt));
-        let result = parse_extended_advertising_report(&pkt, false);
-        assert!(result.is_some(), "expected a RuuviTag measurement");
-        let measurement = result.unwrap().expect("payload should decode");
-        // Address is little-endian on the wire, so it reverses on decode.
-        assert_eq!(
-            measurement.mac,
-            MacAddress([0x06, 0x05, 0x04, 0x03, 0x02, 0x01])
-        );
-        // RSSI 0xC3 = -61 dBm, from the extended per-report header.
-        assert_eq!(measurement.rssi, Some(-61));
+        assert_ruuvi_decode(parse_extended_advertising_report(&pkt, false), Some(-61));
     }
 
     #[test]
     fn test_parse_report_too_short_verbose_error() {
+        // A too-short report yields "Advertising report too short" in verbose
+        // mode and nothing otherwise, whether parsed directly or dispatched
+        // by parse_event.
         let pkt = truncated_meta_event(EVT_LE_EXTENDED_ADVERTISING_REPORT, 16);
         assert_eq!(pkt.len(), 20);
-
-        assert_eq!(
-            parse_extended_advertising_report(&pkt, true),
-            Some(Err(DecodeError::InvalidData(
-                "Advertising report too short".into()
-            )))
-        );
-        assert!(parse_extended_advertising_report(&pkt, false).is_none());
+        assert_too_short(parse_extended_advertising_report, &pkt);
+        assert_too_short(parse_event, &pkt);
+        assert!(parse_event(&pkt, false).is_none());
     }
 
     #[test]
@@ -336,11 +354,7 @@ mod tests {
             rssi: 0xB0, // -80 dBm
             ..Default::default()
         });
-        assert!(might_be_ruuvi(&pkt));
-        let measurement = parse_advertising_report(&pkt, false)
-            .unwrap()
-            .expect("payload should decode");
-        assert_eq!(measurement.rssi, Some(-80));
+        assert_ruuvi_decode(parse_advertising_report(&pkt, false), Some(-80));
     }
 
     #[test]
@@ -350,10 +364,7 @@ mod tests {
             rssi: RSSI_UNAVAILABLE as u8,
             ..Default::default()
         });
-        let measurement = parse_advertising_report(&pkt, false)
-            .unwrap()
-            .expect("payload should decode");
-        assert_eq!(measurement.rssi, None);
+        assert_ruuvi_decode(parse_advertising_report(&pkt, false), None);
     }
 
     #[test]
@@ -365,14 +376,7 @@ mod tests {
                 ..Default::default()
             }),
         ] {
-            let measurement = parse_event(&pkt, false)
-                .expect("report should dispatch")
-                .expect("payload should decode");
-            assert_eq!(
-                measurement.mac,
-                MacAddress([0x06, 0x05, 0x04, 0x03, 0x02, 0x01])
-            );
-            assert_eq!(measurement.rssi, Some(-80)); // default 0xB0
+            assert_ruuvi_decode(parse_event(&pkt, false), Some(-80)); // default 0xB0
         }
     }
 
@@ -381,7 +385,7 @@ mod tests {
         // A Ruuvi-shaped report carrying a different manufacturer ID is
         // dropped before the payload is touched.
         let pkt = report(ReportSpec {
-            ad: Some(&[0x06, 0xFF, 0x12, 0x34, 0x00, 0x00, 0x00]),
+            ad: &[0x06, 0xFF, 0x12, 0x34, 0x00, 0x00, 0x00],
             ..Default::default()
         });
         assert!(!might_be_ruuvi(&pkt));
@@ -413,14 +417,13 @@ mod tests {
 
     #[test]
     fn test_parse_event_zero_reports_is_not_an_error() {
+        // A controller reporting no advertisements yields nothing to decode,
+        // even in verbose mode.
         let pkt = report(ReportSpec {
             num_reports: 0,
             ..Default::default()
         });
-        // A controller reporting no advertisements yields nothing to decode,
-        // even in verbose mode.
-        assert!(parse_event(&pkt, false).is_none());
-        assert!(parse_event(&pkt, true).is_none());
+        assert_silent(parse_event, &pkt);
     }
 
     #[test]
@@ -432,20 +435,7 @@ mod tests {
             data_len: Some(200),
             ..Default::default()
         });
-        assert!(parse_event(&pkt, false).is_none());
-        assert!(parse_event(&pkt, true).is_none());
-    }
-
-    #[test]
-    fn test_parse_event_propagates_verbose_error() {
-        let pkt = truncated_meta_event(EVT_LE_EXTENDED_ADVERTISING_REPORT, 16);
-        assert_eq!(
-            parse_event(&pkt, true),
-            Some(Err(DecodeError::InvalidData(
-                "Advertising report too short".into()
-            )))
-        );
-        assert!(parse_event(&pkt, false).is_none());
+        assert_silent(parse_event, &pkt);
     }
 
     #[test]
@@ -454,12 +444,7 @@ mod tests {
         // parsers must not panic on them either; verbose reports the error,
         // silent mode drops the event.
         let truncated = [HCI_EVENT_PKT, EVT_LE_META_EVENT];
-        assert_eq!(
-            parse_advertising_report(&truncated, true),
-            Some(Err(DecodeError::InvalidData(
-                "Advertising report too short".into()
-            )))
-        );
+        assert_too_short(parse_advertising_report, &truncated);
         assert!(parse_advertising_report(&truncated, false).is_none());
 
         // A full header without a report body takes the same path.
@@ -478,41 +463,32 @@ mod tests {
         // Flags data, a foreign manufacturer entry, then the Ruuvi entry: the
         // AD walk must skip the first two and decode the third.
         let pkt = report(ReportSpec {
-            ad: Some(&[
+            ad: &[
                 0x02, 0x01, 0x06, // AD type: Flags
                 0x06, 0xFF, 0x12, 0x34, 0x00, 0x00, 0x00, // foreign mfg data
                 27, 0xFF, 0x99, 0x04, 0x05, // Ruuvi format-5 entry
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            ]),
+            ],
             ..Default::default()
         });
-        let measurement = parse_advertising_report(&pkt, false)
-            .expect("report should parse")
-            .expect("payload should decode");
-        assert_eq!(
-            measurement.mac,
-            MacAddress([0x06, 0x05, 0x04, 0x03, 0x02, 0x01])
-        );
-        assert_eq!(measurement.rssi, Some(-80)); // default 0xB0
+        assert_ruuvi_decode(parse_advertising_report(&pkt, false), Some(-80));
     }
 
     #[test]
     fn test_parse_report_malformed_ad_length_is_silent() {
         // A zero-length AD entry terminates the walk without an error...
         let zero_len = report(ReportSpec {
-            ad: Some(&[0x00]),
+            ad: &[0x00],
             ..Default::default()
         });
-        assert!(parse_advertising_report(&zero_len, true).is_none());
-        assert!(parse_advertising_report(&zero_len, false).is_none());
+        assert_silent(parse_advertising_report, &zero_len);
 
         // ...as does one whose claimed length overruns the AD data.
         let overrun = report(ReportSpec {
-            ad: Some(&[0x20, 0xFF, 0x01]),
+            ad: &[0x20, 0xFF, 0x01],
             ..Default::default()
         });
-        assert!(parse_advertising_report(&overrun, true).is_none());
-        assert!(parse_advertising_report(&overrun, false).is_none());
+        assert_silent(parse_advertising_report, &overrun);
     }
 
     #[test]
@@ -520,11 +496,10 @@ mod tests {
         // Flags and foreign manufacturer data, never a Ruuvi ID: the walk
         // exhausts the AD data and yields nothing.
         let pkt = report(ReportSpec {
-            ad: Some(&[0x02, 0x01, 0x06, 0x06, 0xFF, 0x12, 0x34, 0x00, 0x00, 0x00]),
+            ad: &[0x02, 0x01, 0x06, 0x06, 0xFF, 0x12, 0x34, 0x00, 0x00, 0x00],
             ..Default::default()
         });
-        assert!(parse_advertising_report(&pkt, true).is_none());
-        assert!(parse_advertising_report(&pkt, false).is_none());
+        assert_silent(parse_advertising_report, &pkt);
     }
 
     #[test]
@@ -533,7 +508,7 @@ mod tests {
         // byte (0x00) is unknown. The decoder error surfaces whether or not
         // verbose is set; suppressing it is the scan loop's job.
         let pkt = report(ReportSpec {
-            ad: Some(&[0x04, 0xFF, 0x99, 0x04, 0x00]),
+            ad: &[0x04, 0xFF, 0x99, 0x04, 0x00],
             ..Default::default()
         });
         for verbose in [false, true] {
