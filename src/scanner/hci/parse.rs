@@ -17,120 +17,107 @@ pub(crate) fn might_be_ruuvi(data: &[u8]) -> bool {
     data.windows(2).any(|w| w == RUUVI_MANUFACTURER_ID_LE)
 }
 
+/// The per-report header fields of an advertising report, which differ between
+/// the legacy (0x02) and extended (0x0D) formats.
+struct ReportLayout {
+    /// Offset of the 6-byte address (little-endian on the wire).
+    addr: usize,
+    /// Offset of the one-byte AD data length.
+    data_len: usize,
+    /// Where the RSSI byte is read from.
+    rssi: Rssi,
+}
+
+/// Where the RSSI byte lives in a report.
+enum Rssi {
+    /// Trailing byte after the AD data; absent means "not available".
+    Trailing,
+    /// Fixed position inside the per-report header.
+    Fixed(usize),
+}
+
+// Legacy per-report header: [0]num_reports [1]event_type [2]addr_type
+// [3..9]addr [9]data_len [10..]data, RSSI trailing the data.
+const LEGACY_REPORT: ReportLayout = ReportLayout {
+    addr: 3,
+    data_len: 9,
+    rssi: Rssi::Trailing,
+};
+
+// Extended per-report header: [0]num_reports [1..3]event_type [3]addr_type
+// [4..10]addr [10]phy [11]phy [12]sid [13]tx_power [14]rssi [15..17]periodic
+// interval [17]direct_addr_type [18..24]direct_addr [24]data_len [25..]data.
+const EXTENDED_REPORT: ReportLayout = ReportLayout {
+    addr: 4,
+    data_len: 24,
+    rssi: Rssi::Fixed(14),
+};
+
 /// Parse a legacy LE Advertising Report (subevent 0x02) and extract RuuviTag data.
 pub(crate) fn parse_advertising_report(data: &[u8], verbose: bool) -> Option<MeasurementResult> {
-    // Minimum size for an advertising report (4-byte HCI header + 8 report bytes)
-    if data.len() < 12 {
-        return if verbose {
-            Some(Err(DecodeError::InvalidData(
-                "Advertising report too short".into(),
-            )))
-        } else {
-            None
-        };
-    }
-
-    // Skip HCI header (1 byte packet type + 1 byte event code + 1 byte param len + 1 byte subevent)
-    let report = &data[HCI_EVENT_HEADER_LEN..];
-
-    if report.is_empty() {
-        return None;
-    }
-
-    // Number of reports
-    let num_reports = report[0] as usize;
-    if num_reports == 0 {
-        return None;
-    }
-
-    // Legacy per-report header:
-    //   num_reports(1) event_type(1) addr_type(1) address(6) data_len(1) data(..) rssi(1)
-    // Extract address (6 bytes, in reverse order)
-    if report.len() < 10 {
-        return None;
-    }
-    let mut addr = [0u8; 6];
-    addr.copy_from_slice(&report[3..9]);
-    addr.reverse(); // HCI uses little-endian address
-
-    let data_len = report[9] as usize;
-    if report.len() < 10 + data_len {
-        return None;
-    }
-
-    // The RSSI byte follows the advertising data; a truncated report means
-    // the controller did not include it.
-    let rssi = report
-        .get(10 + data_len)
-        .copied()
-        .unwrap_or(RSSI_UNAVAILABLE as u8) as i8;
-
-    parse_ruuvi_from_ad_data(&report[10..10 + data_len], addr, rssi)
+    parse_report(data, verbose, LEGACY_REPORT)
 }
 
 /// Parse an LE Extended Advertising Report (subevent 0x0D) and extract RuuviTag data.
 ///
 /// Bluetooth 5 controllers report advertisements with this event once extended
-/// scanning is enabled. Its per-report header is larger than the legacy one and
-/// carries PHY/SID/TX-power fields before the advertising data.
+/// scanning is enabled; its per-report header is larger than the legacy one.
 pub(crate) fn parse_extended_advertising_report(
     data: &[u8],
     verbose: bool,
 ) -> Option<MeasurementResult> {
-    if data.len() < HCI_EVENT_HEADER_LEN {
-        return if verbose {
-            Some(Err(DecodeError::InvalidData(
-                "Advertising report too short".into(),
-            )))
-        } else {
-            None
-        };
+    parse_report(data, verbose, EXTENDED_REPORT)
+}
+
+/// Parse `data` as an advertising report laid out per `layout`, returning a
+/// measurement when it decodes as a RuuviTag.
+///
+/// Truncated reports yield `DecodeError::InvalidData` when `verbose` and are
+/// dropped silently otherwise.
+fn parse_report(data: &[u8], verbose: bool, layout: ReportLayout) -> Option<MeasurementResult> {
+    let report = match data.get(HCI_EVENT_HEADER_LEN..) {
+        Some(report) if !report.is_empty() => report,
+        _ => return too_short(verbose),
+    };
+    if report[0] == 0 {
+        return None; // num_reports == 0
+    }
+    // The report must at least cover the address and the data-length byte.
+    if report.len() <= layout.data_len {
+        return too_short(verbose);
     }
 
-    // Skip HCI header (pkt type + event code + param len + subevent)
-    let report = &data[HCI_EVENT_HEADER_LEN..];
-
-    // Number of reports
-    let num_reports = *report.first()?;
-    if num_reports == 0 {
-        return None;
-    }
-
-    // Extended per-report header (relative to `report`):
-    //   [0]      num_reports
-    //   [1..3]   event_type (2)
-    //   [3]      address_type
-    //   [4..10]  address (6)
-    //   [10]     primary_phy
-    //   [11]     secondary_phy
-    //   [12]     advertising_sid
-    //   [13]     tx_power
-    //   [14]     rssi
-    //   [15..17] periodic_advertising_interval (2)
-    //   [17]     direct_address_type
-    //   [18..24] direct_address (6)
-    //   [24]     data_length
-    //   [25..]   data
-    if report.len() < 25 {
-        return if verbose {
-            Some(Err(DecodeError::InvalidData(
-                "Advertising report too short".into(),
-            )))
-        } else {
-            None
-        };
-    }
     let mut addr = [0u8; 6];
-    addr.copy_from_slice(&report[4..10]);
+    addr.copy_from_slice(&report[layout.addr..layout.addr + 6]);
     addr.reverse(); // HCI uses little-endian address
 
-    let data_len = report[24] as usize;
-    if report.len() < 25 + data_len {
-        return None;
+    let data_len = report[layout.data_len] as usize;
+    let data_start = layout.data_len + 1;
+    if report.len() < data_start + data_len {
+        return None; // truncated AD data
     }
-    let rssi = report[14] as i8; // RSSI byte in the extended per-report header
+    let rssi = match layout.rssi {
+        // The RSSI byte follows the advertising data; a report truncated here
+        // means the controller did not include it.
+        Rssi::Trailing => report
+            .get(data_start + data_len)
+            .copied()
+            .unwrap_or(RSSI_UNAVAILABLE as u8) as i8,
+        Rssi::Fixed(off) => report[off] as i8,
+    };
 
-    parse_ruuvi_from_ad_data(&report[25..25 + data_len], addr, rssi)
+    parse_ruuvi_from_ad_data(&report[data_start..data_start + data_len], addr, rssi)
+}
+
+/// Build the verbose-mode error for an advertising report too short to parse.
+fn too_short(verbose: bool) -> Option<MeasurementResult> {
+    if verbose {
+        Some(Err(DecodeError::InvalidData(
+            "Advertising report too short".into(),
+        )))
+    } else {
+        None
+    }
 }
 
 /// Walk the AD structures of an advertisement and decode any RuuviTag
