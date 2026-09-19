@@ -9,6 +9,9 @@ use std::mem;
 use std::ops::Deref;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
+/// LE scan interval and window: 200 ms in 0.625 ms units (0x140 = 320 ticks).
+const SCAN_200MS: u16 = 0x0140;
+
 /// Owned raw HCI socket bound to one controller.
 pub(crate) struct HciSocket {
     fd: OwnedFd,
@@ -115,58 +118,9 @@ impl HciFilter {
     }
 }
 
-/// LE Set Scan Parameters command
-#[repr(C, packed)]
-struct LeSetScanParametersCmd {
-    scan_type: u8,
-    interval: u16,
-    window: u16,
-    own_address_type: u8,
-    filter_policy: u8,
-}
-
-/// LE Set Scan Enable command
-#[repr(C, packed)]
-struct LeSetScanEnableCmd {
-    enable: u8,
-    filter_dup: u8,
-}
-
-/// LE Set Extended Scan Parameters command (Bluetooth 5.x).
-///
-/// This variant carries one parameter block per scanning PHY. We only ever
-/// scan on the LE 1M PHY (`scanning_phys == LE_1M_PHY`), so exactly one
-/// `{scan_type, interval, window}` block follows the PHY bitmask.
-#[repr(C, packed)]
-struct LeSetExtendedScanParametersCmd {
-    own_address_type: u8,
-    filter_policy: u8,
-    scanning_phys: u8,
-    scan_type: u8,
-    interval: u16,
-    window: u16,
-}
-
-/// LE Set Extended Scan Enable command (Bluetooth 5.x).
-#[repr(C, packed)]
-struct LeSetExtendedScanEnableCmd {
-    enable: u8,
-    filter_dup: u8,
-    duration: u16,
-    period: u16,
-}
-
 /// Compose an HCI opcode from an OGF and OCF.
 fn hci_opcode(ogf: u16, ocf: u16) -> u16 {
     (ogf << 10) | ocf
-}
-
-/// View a value as raw bytes (only sound for the `#[repr(C)]`/`#[repr(C, packed)]`
-/// command structs this is used with).
-fn as_bytes<T>(value: &T) -> &[u8] {
-    // Safety: only sound for #[repr(C)]/#[repr(C, packed)] structs such as the
-    // command types this helper is used with.
-    unsafe { std::slice::from_raw_parts(value as *const T as *const u8, mem::size_of::<T>()) }
 }
 
 /// Create an HCI command packet
@@ -423,46 +377,46 @@ impl ScanMode {
 
     /// Wire bytes for LE Set Scan Parameters: passive scan, 200ms interval,
     /// 200ms window, public address, accept-all policy. The extended variant
-    /// carries one PHY block (LE 1M).
+    /// carries one scan parameter block per scanning PHY; we only ever scan
+    /// on the LE 1M PHY (`scanning_phys == LE_1M_PHY`), so exactly one
+    /// `{scan_type, interval, window}` block follows the PHY bitmask.
     fn set_params_bytes(self) -> Vec<u8> {
+        // Interval and window are identical: 200 ms (0x0140) in 0.625 ms units.
+        let (lo, hi) = (SCAN_200MS as u8, (SCAN_200MS >> 8) as u8);
         match self {
-            Self::Legacy => as_bytes(&LeSetScanParametersCmd {
-                scan_type: LE_SCAN_PASSIVE,
-                interval: 0x0140, // 200ms in 0.625ms units (0x140 = 320 * 0.625ms)
-                window: 0x0140,   // 200ms in 0.625ms units (0x140 = 320 * 0.625ms)
-                own_address_type: LE_PUBLIC_ADDRESS,
-                filter_policy: FILTER_POLICY_ACCEPT_ALL,
-            })
-            .to_vec(),
-            Self::Extended => as_bytes(&LeSetExtendedScanParametersCmd {
-                own_address_type: LE_PUBLIC_ADDRESS,
-                filter_policy: FILTER_POLICY_ACCEPT_ALL,
-                scanning_phys: LE_1M_PHY,
-                scan_type: LE_SCAN_PASSIVE,
-                interval: 0x0140, // 200ms in 0.625ms units
-                window: 0x0140,   // 200ms in 0.625ms units
-            })
-            .to_vec(),
+            // scan_type, interval, window, own_addr_type, filter_policy
+            Self::Legacy => vec![
+                LE_SCAN_PASSIVE,
+                lo,
+                hi,
+                lo,
+                hi,
+                LE_PUBLIC_ADDRESS,
+                FILTER_POLICY_ACCEPT_ALL,
+            ],
+            // own_addr_type, filter_policy, scanning_phys, scan_type, interval, window
+            Self::Extended => vec![
+                LE_PUBLIC_ADDRESS,
+                FILTER_POLICY_ACCEPT_ALL,
+                LE_1M_PHY,
+                LE_SCAN_PASSIVE,
+                lo,
+                hi,
+                lo,
+                hi,
+            ],
         }
     }
 
     /// Wire bytes for LE Set Scan Enable; the extended variant adds the
     /// duration/period fields (both zero for continuous scanning).
     fn enable_bytes(self, enable: bool) -> Vec<u8> {
-        match self {
-            Self::Legacy => as_bytes(&LeSetScanEnableCmd {
-                enable: enable as u8,
-                filter_dup: 0x00, // Don't filter duplicates
-            })
-            .to_vec(),
-            Self::Extended => as_bytes(&LeSetExtendedScanEnableCmd {
-                enable: enable as u8,
-                filter_dup: 0x00, // Don't filter duplicates
-                duration: 0x0000,
-                period: 0x0000,
-            })
-            .to_vec(),
+        // enable, filter_dup (duplicates not filtered)
+        let mut bytes = vec![enable as u8, 0x00];
+        if matches!(self, Self::Extended) {
+            bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // duration, period
         }
+        bytes
     }
 }
 
@@ -536,45 +490,9 @@ mod tests {
 
     #[test]
     fn test_hci_command_packet() {
+        // opcode 0x200C (OGF_LE_CTL << 10 | OCF_LE_SET_SCAN_ENABLE), 2 params
         let packet = hci_command_packet(OGF_LE_CTL, OCF_LE_SET_SCAN_ENABLE, &[0x01, 0x00]);
-
-        assert_eq!(packet[0], 0x01); // Command packet type
-        assert_eq!(packet.len(), 6); // Header + 2 params
-    }
-
-    #[test]
-    fn test_as_bytes() {
-        let cmd = LeSetScanEnableCmd {
-            enable: 1,
-            filter_dup: 0,
-        };
-        assert_eq!(as_bytes(&cmd), &[0x01, 0x00]);
-
-        let ext_params = LeSetExtendedScanParametersCmd {
-            own_address_type: LE_PUBLIC_ADDRESS,
-            filter_policy: FILTER_POLICY_ACCEPT_ALL,
-            scanning_phys: LE_1M_PHY,
-            scan_type: LE_SCAN_PASSIVE,
-            interval: 0x0140, // 200ms in 0.625ms units
-            window: 0x0140,   // 200ms in 0.625ms units
-        };
-        assert_eq!(
-            as_bytes(&ext_params),
-            &[0x00, 0x00, 0x01, 0x00, 0x40, 0x01, 0x40, 0x01]
-        );
-
-        let ext_enable = LeSetExtendedScanEnableCmd {
-            enable: 1,
-            filter_dup: 0,
-            duration: 0x001E,
-            period: 0x0000,
-        };
-        assert_eq!(as_bytes(&ext_enable), &[0x01, 0x00, 0x1E, 0x00, 0x00, 0x00]);
-    }
-
-    #[test]
-    fn test_hci_opcode() {
-        assert_eq!(hci_opcode(OGF_LE_CTL, OCF_LE_SET_SCAN_ENABLE), 0x200C);
+        assert_eq!(packet, vec![0x01, 0x0C, 0x20, 0x02, 0x01, 0x00]);
     }
 
     #[test]
@@ -591,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_mode_bytes() {
+    fn test_scan_mode_wire_bytes_and_ocfs() {
         // Legacy LE Set Scan Parameters: scan_type=passive, 200ms interval and
         // window, public address, accept-all filter policy (7 bytes).
         assert_eq!(
@@ -616,10 +534,8 @@ mod tests {
             ScanMode::Extended.enable_bytes(false),
             vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
-    }
 
-    #[test]
-    fn test_scan_mode_ocfs() {
+        // Each mode uses its own command OCFs.
         assert_eq!(
             ScanMode::Legacy.set_params_ocf(),
             OCF_LE_SET_SCAN_PARAMETERS
