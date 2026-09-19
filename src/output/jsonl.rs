@@ -78,6 +78,7 @@ impl JsonLinesFormatter {
         write_field!("\"pressure\"", m.pressure.map(|p| p / 1000.0));
         write_field!("\"battery_potential\"", m.battery);
         write_field!("\"tx_power\"", m.tx_power);
+        write_field!("\"rssi\"", m.rssi);
         write_field!("\"movement_counter\"", m.movement_counter);
         write_field!("\"measurement_sequence_number\"", m.measurement_sequence);
         if let Some((x, y, z)) = m.acceleration {
@@ -139,6 +140,7 @@ mod tests {
         m.pressure = Some(101481.0);
         m.battery = Some(3.007);
         m.tx_power = Some(-4);
+        m.rssi = Some(-63);
         m.movement_counter = Some(42);
         m.measurement_sequence = Some(1234);
         m.acceleration = Some((-0.055, -0.032, 0.998));
@@ -164,7 +166,7 @@ mod tests {
             "{\"mac\":\"AA:BB:CC:DD:EE:FF\",\"name\":\"AA:BB:CC:DD:EE:FF\",\"format\":\"v5\",\
              \"timestamp\":\"2019-01-05T09:47:35.691300729Z\",\"temperature\":19.63,\
              \"humidity\":19.5,\"pressure\":101.481,\"battery_potential\":3.007,\"tx_power\":-4,\
-             \"movement_counter\":42,\"measurement_sequence_number\":1234,\
+             \"rssi\":-63,\"movement_counter\":42,\"measurement_sequence_number\":1234,\
              \"acceleration_x\":-0.055,\"acceleration_y\":-0.032,\"acceleration_z\":0.998,\
              \"pm1_0\":5.5,\"pm2_5\":12.5,\"pm4_0\":8.2,\"pm10_0\":15.1,\"co2\":420,\
              \"voc_index\":123,\"nox_index\":45,\"luminosity\":10}"

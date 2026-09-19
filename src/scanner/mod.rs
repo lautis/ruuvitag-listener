@@ -82,6 +82,25 @@ pub const RUUVI_MANUFACTURER_ID_BYTES: [u8; 2] = [0x99, 0x04];
 #[cfg(any(feature = "bluer", feature = "hci"))]
 pub const RUUVI_MANUFACTURER_ID: u16 = 0x0499;
 
+/// HCI "RSSI not available" sentinel value.
+///
+/// Legacy and extended LE Advertising Reports use 127 to signal that the
+/// controller did not report a signal strength. The sentinel is mapped to
+/// `None` by [`with_rssi`] so it never appears in the output.
+const RSSI_UNAVAILABLE: i8 = 127;
+
+/// Attach an RSSI reading in dBm (from the radio advertisement, not the Ruuvi
+/// payload) to a decoded measurement.
+///
+/// The HCI "not available" sentinel (127) is mapped to `None` so those packets
+/// are indistinguishable from backends that never report RSSI.
+pub(crate) fn with_rssi(mut measurement: Measurement, rssi: i8) -> Measurement {
+    if rssi != RSSI_UNAVAILABLE {
+        measurement.rssi = Some(rssi);
+    }
+    measurement
+}
+
 /// Bluetooth manufacturer-specific data type (AD type 0xFF)
 #[cfg(feature = "bluer")]
 pub const MANUFACTURER_DATA_TYPE: u8 = 0xff;
@@ -203,6 +222,7 @@ pub fn decode_ruuvi_data(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
             .battery_potential_as_millivolts()
             .map(|millivolts| f64::from(millivolts) / 1000.0),
         tx_power: values.tx_power_as_dbm(),
+        rssi: None, // Set by the scanner backend from the radio advertisement.
         movement_counter: values.movement_counter(),
         measurement_sequence: values.measurement_sequence_number(),
         acceleration,

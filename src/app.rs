@@ -271,6 +271,7 @@ mod tests {
             pressure: Some(101_325.0),
             battery: Some(3.0),
             tx_power: Some(4),
+            rssi: None,
             movement_counter: Some(10),
             measurement_sequence: Some(100),
             acceleration: None,

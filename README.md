@@ -100,10 +100,10 @@ Running `ruuvitag-listener` will output measurements to STDOUT until interrupted
 Example output:
 
 ```
-ruuvi_measurement,mac=F7:2A:60:0D:6E:1E,name=F7:2A:60:0D:6E:1E acceleration_x=-0.055,acceleration_y=-0.032,acceleration_z=0.998,battery_potential=3.007,humidity=19.5,pressure=101.481,temperature=19.63 1546681652675044272
-ruuvi_measurement,mac=F1:FC:AA:80:4E:59,name=F1:FC:AA:80:4E:59 acceleration_x=0.005,acceleration_y=0.015,acceleration_z=1.036,battery_potential=2.989,humidity=17.5,pressure=101.536,temperature=21.97 1546681653451240083
+ruuvi_measurement,mac=F7:2A:60:0D:6E:1E,name=F7:2A:60:0D:6E:1E acceleration_x=-0.055,acceleration_y=-0.032,acceleration_z=0.998,battery_potential=3.007,humidity=19.5,pressure=101.481,rssi=-61,temperature=19.63 1546681652675044272
+ruuvi_measurement,mac=F1:FC:AA:80:4E:59,name=F1:FC:AA:80:4E:59 acceleration_x=0.005,acceleration_y=0.015,acceleration_z=1.036,battery_potential=2.989,humidity=17.5,pressure=101.536,rssi=-54,temperature=21.97 1546681653451240083
 ruuvi_measurement,mac=F1:FC:AA:80:4E:59,name=F1:FC:AA:80:4E:59 pm1_0=5.5,pm2_5=12.5,pm4_0=8.2,pm10_0=15.1,co2=420,voc_index=123,nox_index=45,luminosity=10,temperature=21.97 1546681654458923308
-ruuvi_measurement,mac=F7:2A:60:0D:6E:1E,name=F7:2A:60:0D:6E:1E acceleration_x=-0.052,acceleration_y=-0.032,acceleration_z=1,battery_potential=3.013,humidity=19.5,pressure=101.481,temperature=19.63 1546681655691300729
+ruuvi_measurement,mac=F7:2A:60:0D:6E:1E,name=F7:2A:60:0D:6E:1E acceleration_x=-0.052,acceleration_y=-0.032,acceleration_z=1,battery_potential=3.013,humidity=19.5,pressure=101.481,rssi=-63,temperature=19.63 1546681655691300729
 ```
 
 You can also define the InfluxDB measurement name or aliases using command line arguments. For example
@@ -113,8 +113,8 @@ ruuvitag-listener --influxdb-measurement=ruuvi --alias F1:FC:AA:80:4E:59=Indoor 
 ```
 
 ```
-ruuvi,mac=F1:FC:AA:80:4E:59,name=Indoor acceleration_x=0,acceleration_y=0.017,acceleration_z=1.027,battery_potential=2.989,humidity=17.5,pressure=101.54,temperature=21.97 1546681957964524841
-ruuvi,mac=F7:2A:60:0D:6E:1E,name=Outdoor acceleration_x=-0.054,acceleration_y=-0.032,acceleration_z=1.005,battery_potential=3.013,humidity=83.5,pressure=101.487,temperature=-5.63 1546681958085455294
+ruuvi,mac=F1:FC:AA:80:4E:59,name=Indoor acceleration_x=0,acceleration_y=0.017,acceleration_z=1.027,battery_potential=2.989,humidity=17.5,pressure=101.54,rssi=-58,temperature=21.97 1546681957964524841
+ruuvi,mac=F7:2A:60:0D:6E:1E,name=Outdoor acceleration_x=-0.054,acceleration_y=-0.032,acceleration_z=1.005,battery_potential=3.013,humidity=83.5,pressure=101.487,rssi=-65,temperature=-5.63 1546681958085455294
 ```
 
 ## Output Formats
@@ -132,7 +132,7 @@ ruuvitag-listener --format jsonl
 ```
 
 ```
-{"mac":"F1:FC:AA:80:4E:59","name":"Indoor","format":"v5","timestamp":"2019-01-05T09:47:35.691300729Z","temperature":21.97,"humidity":17.5,"pressure":101.536,"battery_potential":2.989,"acceleration_x":0.005,"acceleration_y":0.015,"acceleration_z":1.036}
+{"mac":"F1:FC:AA:80:4E:59","name":"Indoor","format":"v5","timestamp":"2019-01-05T09:47:35.691300729Z","temperature":21.97,"humidity":17.5,"pressure":101.536,"battery_potential":2.989,"rssi":-54,"acceleration_x":0.005,"acceleration_y":0.015,"acceleration_z":1.036}
 ```
 
 JSON Lines omits fields that are absent from the advertisement.
@@ -142,13 +142,17 @@ ruuvitag-listener --format csv > measurements.csv
 ```
 
 ```
-mac,name,timestamp,format,temperature,humidity,pressure,battery_potential,tx_power,movement_counter,measurement_sequence_number,acceleration_x,acceleration_y,acceleration_z,pm1_0,pm2_5,pm4_0,pm10_0,co2,voc_index,nox_index,luminosity
-F1:FC:AA:80:4E:59,Indoor,2019-01-05T09:47:35.691300729Z,v5,21.97,17.5,101.536,2.989,,,0.005,0.015,1.036,,,,,,,,
+mac,name,timestamp,format,temperature,humidity,pressure,battery_potential,tx_power,rssi,movement_counter,measurement_sequence_number,acceleration_x,acceleration_y,acceleration_z,pm1_0,pm2_5,pm4_0,pm10_0,co2,voc_index,nox_index,luminosity
+F1:FC:AA:80:4E:59,Indoor,2019-01-05T09:47:35.691300729Z,v5,21.97,17.5,101.536,2.989,,,,0.005,0.015,1.036,,,,,,,,
 ```
 
 In JSON Lines and CSV output, timestamps are RFC 3339 in UTC and pressure is
 reported in kilopascals, matching the InfluxDB line protocol output. The
 `--influxdb-measurement` option only applies to `--format influxdb`.
+
+All formats include the received signal strength `rssi` (in dBm) whenever the
+Bluetooth adapter reports one; it is omitted from InfluxDB and JSON Lines lines
+and left empty in CSV when unavailable.
 
 All options can be listed with `ruuvitag-listener --help`.
 

@@ -147,6 +147,7 @@ impl InfluxDbFormatter {
         write_field!("pressure", m.pressure.map(Self::pressure_kpa));
         write_field!("battery_potential", m.battery);
         write_field!("tx_power", m.tx_power.map(f64::from));
+        write_field!("rssi", m.rssi.map(f64::from));
         write_field!("movement_counter", m.movement_counter.map(f64::from));
         write_field!(
             "measurement_sequence_number",
@@ -249,6 +250,7 @@ mod tests {
         measurement.pressure = Some(101325.0);
         measurement.battery = Some(3.0);
         measurement.tx_power = Some(4);
+        measurement.rssi = Some(-63);
         measurement.movement_counter = Some(10);
         measurement.measurement_sequence = Some(100);
         measurement.acceleration = Some((0.01, -0.02, 1.0));
@@ -272,6 +274,7 @@ mod tests {
                 "pressure=101.325", // Pa -> kPa
                 "battery_potential=3",
                 "tx_power=4",
+                "rssi=-63",
                 "movement_counter=10",
                 "measurement_sequence_number=100",
                 "acceleration_x=0.01",

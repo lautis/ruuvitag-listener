@@ -7,7 +7,7 @@ use std::fmt::Write;
 /// Column names. Field names and units match the InfluxDB line protocol
 /// output and the JSON Lines field names.
 const HEADER: &str = "mac,name,timestamp,format,temperature,humidity,pressure,battery_potential,\
-tx_power,movement_counter,measurement_sequence_number,acceleration_x,acceleration_y,\
+tx_power,rssi,movement_counter,measurement_sequence_number,acceleration_x,acceleration_y,\
 acceleration_z,pm1_0,pm2_5,pm4_0,pm10_0,co2,voc_index,nox_index,luminosity";
 
 /// CSV formatter.
@@ -63,6 +63,7 @@ impl CsvFormatter {
         write_value!(m.pressure.map(|p| p / 1000.0));
         write_value!(m.battery);
         write_value!(m.tx_power);
+        write_value!(m.rssi);
         write_value!(m.movement_counter);
         write_value!(m.measurement_sequence);
         if let Some((x, y, z)) = m.acceleration {
@@ -126,6 +127,7 @@ mod tests {
         m.pressure = Some(101481.0);
         m.battery = Some(3.007);
         m.tx_power = Some(-4);
+        m.rssi = Some(-63);
         m.movement_counter = Some(42);
         m.measurement_sequence = Some(1234);
         m.acceleration = Some((-0.055, -0.032, 0.998));
@@ -158,6 +160,7 @@ mod tests {
                 "pressure",
                 "battery_potential",
                 "tx_power",
+                "rssi",
                 "movement_counter",
                 "measurement_sequence_number",
                 "acceleration_x",
@@ -194,6 +197,7 @@ mod tests {
                 "101.481",
                 "3.007",
                 "-4",
+                "-63",
                 "42",
                 "1234",
                 "-0.055",
@@ -219,7 +223,7 @@ mod tests {
         let row = formatter.format(&m, "Indoor");
         let fields: Vec<&str> = row.split(',').collect();
 
-        assert_eq!(fields.len(), 22);
+        assert_eq!(fields.len(), 23);
         assert_eq!(fields[0], "AA:BB:CC:DD:EE:FF");
         assert_eq!(fields[1], "Indoor");
         assert_eq!(fields[4], "25.5");
