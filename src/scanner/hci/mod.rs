@@ -31,6 +31,9 @@ const EVT_CMD_COMPLETE: u8 = 0x0E;
 /// Maximum size of an HCI event delivered to userspace (HCI_MAX_EVENT_SIZE).
 const HCI_EVENT_BUF_SIZE: usize = 258;
 
+/// Size of the fixed HCI event header (packet type, event code, param len, subevent).
+const HCI_EVENT_HEADER_LEN: usize = 4;
+
 // LE Meta event sub-events
 const EVT_LE_ADVERTISING_REPORT: u8 = 0x02;
 const EVT_LE_EXTENDED_ADVERTISING_REPORT: u8 = 0x0D;

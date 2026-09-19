@@ -19,7 +19,7 @@ pub(crate) fn might_be_ruuvi(data: &[u8]) -> bool {
 
 /// Parse a legacy LE Advertising Report (subevent 0x02) and extract RuuviTag data.
 pub(crate) fn parse_advertising_report(data: &[u8], verbose: bool) -> Option<MeasurementResult> {
-    // Minimum size for an advertising report
+    // Minimum size for an advertising report (4-byte HCI header + 8 report bytes)
     if data.len() < 12 {
         return if verbose {
             Some(Err(DecodeError::InvalidData(
@@ -31,7 +31,7 @@ pub(crate) fn parse_advertising_report(data: &[u8], verbose: bool) -> Option<Mea
     }
 
     // Skip HCI header (1 byte packet type + 1 byte event code + 1 byte param len + 1 byte subevent)
-    let report = &data[4..];
+    let report = &data[HCI_EVENT_HEADER_LEN..];
 
     if report.is_empty() {
         return None;
@@ -75,10 +75,20 @@ pub(crate) fn parse_advertising_report(data: &[u8], verbose: bool) -> Option<Mea
 /// carries PHY/SID/TX-power fields before the advertising data.
 pub(crate) fn parse_extended_advertising_report(
     data: &[u8],
-    _verbose: bool,
+    verbose: bool,
 ) -> Option<MeasurementResult> {
+    if data.len() < HCI_EVENT_HEADER_LEN {
+        return if verbose {
+            Some(Err(DecodeError::InvalidData(
+                "Advertising report too short".into(),
+            )))
+        } else {
+            None
+        };
+    }
+
     // Skip HCI header (pkt type + event code + param len + subevent)
-    let report = data.get(4..)?;
+    let report = &data[HCI_EVENT_HEADER_LEN..];
 
     // Number of reports
     let num_reports = *report.first()?;
@@ -102,7 +112,13 @@ pub(crate) fn parse_extended_advertising_report(
     //   [24]     data_length
     //   [25..]   data
     if report.len() < 25 {
-        return None;
+        return if verbose {
+            Some(Err(DecodeError::InvalidData(
+                "Advertising report too short".into(),
+            )))
+        } else {
+            None
+        };
     }
     let mut addr = [0u8; 6];
     addr.copy_from_slice(&report[4..10]);
@@ -222,6 +238,35 @@ mod tests {
         );
         // RSSI 0xC3 = -61 dBm, from the extended per-report header.
         assert_eq!(measurement.rssi, Some(-61));
+    }
+
+    #[test]
+    fn test_parse_extended_report_too_short() {
+        // HCI header + subevent + a truncated per-report body.
+        let mut pkt = vec![
+            HCI_EVENT_PKT,
+            EVT_LE_META_EVENT,
+            0x00,
+            EVT_LE_EXTENDED_ADVERTISING_REPORT,
+        ];
+        pkt.push(0x01); // num_reports
+        pkt.extend_from_slice(&[0x00; 15]); // truncated per-report body
+        assert_eq!(pkt.len(), 20);
+
+        let verbose_result = parse_extended_advertising_report(&pkt, true);
+        assert!(matches!(
+            verbose_result,
+            Some(Err(DecodeError::InvalidData(_)))
+        ));
+        assert_eq!(
+            verbose_result,
+            Some(Err(DecodeError::InvalidData(
+                "Advertising report too short".into()
+            )))
+        );
+
+        let silent_result = parse_extended_advertising_report(&pkt, false);
+        assert!(silent_result.is_none());
     }
 
     #[test]

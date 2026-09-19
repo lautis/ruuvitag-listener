@@ -121,7 +121,7 @@ pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSe
     let task = tokio::spawn(async move {
         let mut buf = [0u8; HCI_EVENT_BUF_SIZE]; // Max HCI event size
 
-        loop {
+        'receive: loop {
             tokio::select! {
                 // Graceful shutdown requested by the scan session.
                 _ = task_cancel.cancelled() => break,
@@ -136,15 +136,18 @@ pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSe
                     loop {
                         let n = match guard.try_io(|inner| read_packet(inner, &mut buf)) {
                             Ok(Ok(n)) if n > 0 => n,
-                            Ok(Ok(_)) => break,  // EOF or empty read
-                            Ok(Err(_)) => break, // Read error
-                            Err(_) => break,     // WouldBlock - no more data
+                            Ok(Ok(_)) => break, // EOF, stop draining
+                            Err(_) => break,    // WouldBlock - no more data
+                            Ok(Err(e)) => {
+                                eprintln!("failed to read HCI event: {e}");
+                                break 'receive; // real error, stop receiving
+                            }
                         };
 
                         // Check if this is an LE advertising report that might be from a
                         // RuuviTag. Controllers emit legacy reports (0x02) or, in
                         // extended/Bluetooth 5 mode, extended reports (0x0D).
-                        if n >= 4 && buf[0] == HCI_EVENT_PKT && buf[1] == EVT_LE_META_EVENT {
+                        if n >= HCI_EVENT_HEADER_LEN && buf[0] == HCI_EVENT_PKT && buf[1] == EVT_LE_META_EVENT {
                             let subevent = buf[3];
                             // Quick check for Ruuvi manufacturer ID before expensive parsing
                             let result = if !might_be_ruuvi(&buf[..n]) {
@@ -157,16 +160,11 @@ pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSe
                                 None
                             };
 
-                            if let Some(result) = result {
-                                match &result {
-                                    Ok(_) => {
-                                        let _ = tx.send(result).await;
-                                    }
-                                    Err(_) if verbose => {
-                                        let _ = tx.send(result).await;
-                                    }
-                                    _ => {}
-                                }
+                            if let Some(result) = result
+                                && (result.is_ok() || verbose)
+                                && tx.send(result).await.is_err()
+                            {
+                                break 'receive; // consumer gone, stop scanning
                             }
                         }
                     }
