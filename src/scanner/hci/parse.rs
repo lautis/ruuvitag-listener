@@ -8,6 +8,12 @@ use crate::scanner::{
     with_rssi,
 };
 
+/// Size of the fixed HCI event header (packet type, event code, param len, subevent).
+const HCI_EVENT_HEADER_LEN: usize = 4;
+
+// AD types
+const AD_TYPE_MANUFACTURER_DATA: u8 = 0xFF;
+
 /// Quick check if a packet might contain Ruuvi manufacturer data.
 ///
 /// This performs a fast scan for the Ruuvi manufacturer ID bytes (0x99 0x04 in LE)

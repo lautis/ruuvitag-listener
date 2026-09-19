@@ -8,7 +8,6 @@
 //! [`scan`] submodules.
 
 use crate::scanner::RUUVI_MANUFACTURER_ID;
-use libc::c_int;
 
 mod bpf;
 mod ffi;
@@ -17,66 +16,22 @@ mod scan;
 
 pub use scan::start_scan;
 
-// HCI protocol constants
-const BTPROTO_HCI: c_int = 1;
-const HCI_FILTER: c_int = 2;
+// Constants shared by more than one submodule live here; constants with a
+// single consumer live in that consumer's module.
 
 // HCI packet types
 const HCI_EVENT_PKT: u8 = 0x04;
 
-// HCI events
+// HCI events and LE Meta sub-events
 const EVT_LE_META_EVENT: u8 = 0x3E;
-const EVT_CMD_COMPLETE: u8 = 0x0E;
-
-/// Maximum size of an HCI event delivered to userspace (HCI_MAX_EVENT_SIZE).
-const HCI_EVENT_BUF_SIZE: usize = 258;
-
-/// Size of the fixed HCI event header (packet type, event code, param len, subevent).
-const HCI_EVENT_HEADER_LEN: usize = 4;
-
-// LE Meta event sub-events
 const EVT_LE_ADVERTISING_REPORT: u8 = 0x02;
 const EVT_LE_EXTENDED_ADVERTISING_REPORT: u8 = 0x0D;
 
-// HCI commands
-const OGF_LE_CTL: u16 = 0x08;
-const OCF_LE_READ_LOCAL_SUPPORTED_FEATURES: u16 = 0x0003;
-const OCF_LE_SET_SCAN_PARAMETERS: u16 = 0x000B;
-const OCF_LE_SET_SCAN_ENABLE: u16 = 0x000C;
-const OCF_LE_SET_EXTENDED_SCAN_PARAMETERS: u16 = 0x0041;
-const OCF_LE_SET_EXTENDED_SCAN_ENABLE: u16 = 0x0042;
-
-// HCI error codes
-const HCI_ERR_COMMAND_DISALLOWED: u8 = 0x0c;
-
-// LE feature bits (from LE Read Local Supported Features)
-// Bit 12 (byte 1, bit 4) = LE Extended Advertising
-const LE_FEATURE_EXTENDED_ADVERTISING_BYTE: usize = 1;
-const LE_FEATURE_EXTENDED_ADVERTISING_BIT: u8 = 1 << 4;
-
-// Scanning PHYs bitmask for extended scan (bit 0 = LE 1M PHY)
-const LE_1M_PHY: u8 = 0x01;
-
-// How long to wait for an HCI command's Command Complete event
-const COMMAND_TIMEOUT_MS: u64 = 1000;
-
-// Scan types
-const LE_SCAN_PASSIVE: u8 = 0x00;
-
-// Own address type
-const LE_PUBLIC_ADDRESS: u8 = 0x00;
-
-// Filter policy
-const FILTER_POLICY_ACCEPT_ALL: u8 = 0x00;
-
-// AD types
-const AD_TYPE_MANUFACTURER_DATA: u8 = 0xFF;
+/// Maximum size of an HCI event delivered to userspace (HCI_MAX_EVENT_SIZE).
+const HCI_EVENT_BUF_SIZE: usize = 258;
 
 // Ruuvi manufacturer ID as little-endian bytes for quick matching
 const RUUVI_MANUFACTURER_ID_LE: [u8; 2] = [
     (RUUVI_MANUFACTURER_ID & 0xFF) as u8,
     (RUUVI_MANUFACTURER_ID >> 8) as u8,
 ];
-
-/// Sysfs directory where the kernel exposes registered HCI controllers.
-const HCI_SYSFS_CLASS: &str = "/sys/class/bluetooth";

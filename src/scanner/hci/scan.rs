@@ -12,6 +12,9 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Sysfs directory where the kernel exposes registered HCI controllers.
+const HCI_SYSFS_CLASS: &str = "/sys/class/bluetooth";
+
 /// Parse an adapter name such as "hci1" (or a bare index "1") into a device id.
 ///
 /// The kernel names controllers strictly "hci<dev_id>", so the id can be

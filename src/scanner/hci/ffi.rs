@@ -9,6 +9,40 @@ use std::mem;
 use std::ops::Deref;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
+// HCI socket protocols and options
+const BTPROTO_HCI: c_int = 1;
+const HCI_FILTER: c_int = 2;
+
+// HCI commands
+const OGF_LE_CTL: u16 = 0x08;
+const OCF_LE_READ_LOCAL_SUPPORTED_FEATURES: u16 = 0x0003;
+const OCF_LE_SET_SCAN_PARAMETERS: u16 = 0x000B;
+const OCF_LE_SET_SCAN_ENABLE: u16 = 0x000C;
+const OCF_LE_SET_EXTENDED_SCAN_PARAMETERS: u16 = 0x0041;
+const OCF_LE_SET_EXTENDED_SCAN_ENABLE: u16 = 0x0042;
+
+// HCI error codes
+const HCI_ERR_COMMAND_DISALLOWED: u8 = 0x0c;
+
+// LE feature bits (from LE Read Local Supported Features)
+// Bit 12 (byte 1, bit 4) = LE Extended Advertising
+const LE_FEATURE_EXTENDED_ADVERTISING_BYTE: usize = 1;
+const LE_FEATURE_EXTENDED_ADVERTISING_BIT: u8 = 1 << 4;
+
+// Scanning PHYs bitmask for extended scan (bit 0 = LE 1M PHY)
+const LE_1M_PHY: u8 = 0x01;
+
+// Scan types, own address type, filter policy
+const LE_SCAN_PASSIVE: u8 = 0x00;
+const LE_PUBLIC_ADDRESS: u8 = 0x00;
+const FILTER_POLICY_ACCEPT_ALL: u8 = 0x00;
+
+// The event the command socket must receive to read back command results
+const EVT_CMD_COMPLETE: u8 = 0x0E;
+
+// How long to wait for an HCI command's Command Complete event
+const COMMAND_TIMEOUT_MS: u64 = 1000;
+
 /// LE scan interval and window: 200 ms in 0.625 ms units (0x140 = 320 ticks).
 const SCAN_200MS: u16 = 0x0140;
 
