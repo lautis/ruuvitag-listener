@@ -270,631 +270,119 @@ fn ruuvi_bpf_program() -> Vec<SockFilter> {
 mod tests {
     use super::*;
 
+    /// Software classic-BPF interpreter for the instruction subset
+    /// [`ruuvi_bpf_program`] emits: absolute byte/half-word loads, `JEQ|K`
+    /// jumps, and `RET|K`. Returns the verdict: zero drops the packet,
+    /// non-zero keeps it.
+    fn run_bpf(prog: &[SockFilter], pkt: &[u8]) -> u32 {
+        let mut pc = 0usize;
+        let mut a: u32 = 0;
+        loop {
+            let ins = &prog[pc];
+            match ins.code & 0x07 {
+                // BPF_RET | BPF_K: verdict is the number of bytes to keep.
+                0x06 => return ins.k,
+                // BPF_LD | BPF_ABS: A = byte, or half-word big-endian, at k.
+                0x00 => {
+                    let off = ins.k as usize;
+                    a = match ins.code & 0x18 {
+                        0x10 => *pkt.get(off).unwrap_or(&0) as u32, // BPF_B
+                        0x08 => {
+                            // BPF_H: the kernel loads half-words big-endian
+                            let hi = *pkt.get(off).unwrap_or(&0);
+                            let lo = *pkt.get(off + 1).unwrap_or(&0);
+                            u32::from(u16::from_be_bytes([hi, lo]))
+                        }
+                        size => panic!("unsupported load size {size:#04x}"),
+                    };
+                }
+                // BPF_JMP | BPF_JEQ | BPF_K: take jt when A == k, else jf.
+                // The generated program only jumps forward.
+                0x05 => {
+                    let offset = if a == ins.k { ins.jt } else { ins.jf };
+                    pc += 1 + offset as usize;
+                    continue;
+                }
+                class => panic!("unsupported instruction class {class:#02x}"),
+            }
+            pc += 1;
+        }
+    }
+
+    /// Build an HCI advertising report with the 16-bit Ruuvi manufacturer ID
+    /// (bytes 0x99 0x04 on the wire, matching [`RUUVI_ID_BE`] read
+    /// big-endian) placed at `id_off`. Every other payload byte is zeroed so
+    /// no other offset can match the ID.
+    fn advertising_report(subevent: u8, id_off: usize) -> Vec<u8> {
+        let mut pkt = vec![0u8; 80];
+        pkt[0] = HCI_EVENT_PKT;
+        pkt[1] = EVT_LE_META_EVENT;
+        pkt[2] = (pkt.len() - 4) as u8; // parameter length
+        pkt[3] = subevent;
+        pkt[4] = 1; // num reports
+        pkt[id_off] = 0x99;
+        pkt[id_off + 1] = 0x04;
+        pkt
+    }
+
     #[test]
-    fn test_ruuvi_bpf_program_matches_previous_output() {
-        // Byte-identical to the program produced before the BpfBuilder
-        // refactor (captured from the hardcoded jump-patching version).
-        const EXPECTED: &[SockFilter] = &[
-            SockFilter {
-                code: 48,
-                jt: 0,
-                jf: 0,
-                k: 0,
-            },
-            SockFilter {
-                code: 21,
-                jt: 0,
-                jf: 99,
-                k: 4,
-            },
-            SockFilter {
-                code: 48,
-                jt: 0,
-                jf: 0,
-                k: 1,
-            },
-            SockFilter {
-                code: 21,
-                jt: 0,
-                jf: 97,
-                k: 62,
-            },
-            SockFilter {
-                code: 48,
-                jt: 0,
-                jf: 0,
-                k: 3,
-            },
-            SockFilter {
-                code: 21,
-                jt: 1,
-                jf: 0,
-                k: 2,
-            },
-            SockFilter {
-                code: 21,
-                jt: 0,
-                jf: 94,
-                k: 13,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 14,
-            },
-            SockFilter {
-                code: 21,
-                jt: 93,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 15,
-            },
-            SockFilter {
-                code: 21,
-                jt: 91,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 16,
-            },
-            SockFilter {
-                code: 21,
-                jt: 89,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 17,
-            },
-            SockFilter {
-                code: 21,
-                jt: 87,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 18,
-            },
-            SockFilter {
-                code: 21,
-                jt: 85,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 19,
-            },
-            SockFilter {
-                code: 21,
-                jt: 83,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 20,
-            },
-            SockFilter {
-                code: 21,
-                jt: 81,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 21,
-            },
-            SockFilter {
-                code: 21,
-                jt: 79,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 22,
-            },
-            SockFilter {
-                code: 21,
-                jt: 77,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 23,
-            },
-            SockFilter {
-                code: 21,
-                jt: 75,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 24,
-            },
-            SockFilter {
-                code: 21,
-                jt: 73,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 25,
-            },
-            SockFilter {
-                code: 21,
-                jt: 71,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 26,
-            },
-            SockFilter {
-                code: 21,
-                jt: 69,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 27,
-            },
-            SockFilter {
-                code: 21,
-                jt: 67,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 28,
-            },
-            SockFilter {
-                code: 21,
-                jt: 65,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 29,
-            },
-            SockFilter {
-                code: 21,
-                jt: 63,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 30,
-            },
-            SockFilter {
-                code: 21,
-                jt: 61,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 31,
-            },
-            SockFilter {
-                code: 21,
-                jt: 59,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 32,
-            },
-            SockFilter {
-                code: 21,
-                jt: 57,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 33,
-            },
-            SockFilter {
-                code: 21,
-                jt: 55,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 34,
-            },
-            SockFilter {
-                code: 21,
-                jt: 53,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 35,
-            },
-            SockFilter {
-                code: 21,
-                jt: 51,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 36,
-            },
-            SockFilter {
-                code: 21,
-                jt: 49,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 37,
-            },
-            SockFilter {
-                code: 21,
-                jt: 47,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 38,
-            },
-            SockFilter {
-                code: 21,
-                jt: 45,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 39,
-            },
-            SockFilter {
-                code: 21,
-                jt: 43,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 40,
-            },
-            SockFilter {
-                code: 21,
-                jt: 41,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 41,
-            },
-            SockFilter {
-                code: 21,
-                jt: 39,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 42,
-            },
-            SockFilter {
-                code: 21,
-                jt: 37,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 43,
-            },
-            SockFilter {
-                code: 21,
-                jt: 35,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 44,
-            },
-            SockFilter {
-                code: 21,
-                jt: 33,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 45,
-            },
-            SockFilter {
-                code: 21,
-                jt: 31,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 46,
-            },
-            SockFilter {
-                code: 21,
-                jt: 29,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 47,
-            },
-            SockFilter {
-                code: 21,
-                jt: 27,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 48,
-            },
-            SockFilter {
-                code: 21,
-                jt: 25,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 49,
-            },
-            SockFilter {
-                code: 21,
-                jt: 23,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 50,
-            },
-            SockFilter {
-                code: 21,
-                jt: 21,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 51,
-            },
-            SockFilter {
-                code: 21,
-                jt: 19,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 52,
-            },
-            SockFilter {
-                code: 21,
-                jt: 17,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 53,
-            },
-            SockFilter {
-                code: 21,
-                jt: 15,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 54,
-            },
-            SockFilter {
-                code: 21,
-                jt: 13,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 55,
-            },
-            SockFilter {
-                code: 21,
-                jt: 11,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 56,
-            },
-            SockFilter {
-                code: 21,
-                jt: 9,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 57,
-            },
-            SockFilter {
-                code: 21,
-                jt: 7,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 58,
-            },
-            SockFilter {
-                code: 21,
-                jt: 5,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 59,
-            },
-            SockFilter {
-                code: 21,
-                jt: 3,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 40,
-                jt: 0,
-                jf: 0,
-                k: 60,
-            },
-            SockFilter {
-                code: 21,
-                jt: 1,
-                jf: 0,
-                k: 39172,
-            },
-            SockFilter {
-                code: 6,
-                jt: 0,
-                jf: 0,
-                k: 0,
-            },
-            SockFilter {
-                code: 6,
-                jt: 0,
-                jf: 0,
-                k: 65535,
-            },
-        ];
-        assert_eq!(ruuvi_bpf_program(), EXPECTED);
+    fn test_filter_accepts_legacy_ruuvi_report() {
+        // Legacy report: AD data starts at offset 14, so a real RuuviTag's
+        // manufacturer ID (after the AD length and type bytes) sits at 16.
+        let prog = ruuvi_bpf_program();
+        let pkt = advertising_report(EVT_LE_ADVERTISING_REPORT, 16);
+        assert_eq!(run_bpf(&prog, &pkt), 0xFFFF);
+    }
+
+    #[test]
+    fn test_filter_accepts_extended_ruuvi_report() {
+        // Extended report: the per-report header is 25 bytes, so AD data
+        // starts at offset 29 and the manufacturer ID follows at 31.
+        let prog = ruuvi_bpf_program();
+        let pkt = advertising_report(EVT_LE_EXTENDED_ADVERTISING_REPORT, 31);
+        assert_eq!(run_bpf(&prog, &pkt), 0xFFFF);
+    }
+
+    #[test]
+    fn test_filter_accepts_id_at_every_scanned_offset() {
+        let prog = ruuvi_bpf_program();
+        for off in FIRST_OFFSET..=LAST_OFFSET {
+            let pkt = advertising_report(EVT_LE_ADVERTISING_REPORT, off as usize);
+            assert_eq!(run_bpf(&prog, &pkt), 0xFFFF, "ID at byte {off} dropped");
+        }
+    }
+
+    #[test]
+    fn test_filter_rejects_id_outside_scanned_window() {
+        let prog = ruuvi_bpf_program();
+        for off in [FIRST_OFFSET - 1, LAST_OFFSET + 1, LAST_OFFSET + 2] {
+            let pkt = advertising_report(EVT_LE_ADVERTISING_REPORT, off as usize);
+            assert_eq!(run_bpf(&prog, &pkt), 0, "ID at byte {off} kept");
+        }
+    }
+
+    #[test]
+    fn test_filter_rejects_non_ruuvi_packets() {
+        let prog = ruuvi_bpf_program();
+
+        // A valid advertising report carrying a different manufacturer ID.
+        let mut pkt = advertising_report(EVT_LE_ADVERTISING_REPORT, 16);
+        pkt[16] = 0x12;
+        pkt[17] = 0x34;
+        assert_eq!(run_bpf(&prog, &pkt), 0);
+
+        // Wrong packet type, event code, or subevent never reaches the ID
+        // checks, regardless of where the ID bytes land.
+        let mut pkt = advertising_report(EVT_LE_ADVERTISING_REPORT, 16);
+        pkt[0] = 0x02;
+        assert_eq!(run_bpf(&prog, &pkt), 0);
+
+        let mut pkt = advertising_report(EVT_LE_ADVERTISING_REPORT, 16);
+        pkt[1] = 0x05;
+        assert_eq!(run_bpf(&prog, &pkt), 0);
+
+        let pkt = advertising_report(0x0B, 16);
+        assert_eq!(run_bpf(&prog, &pkt), 0);
     }
 
     #[test]
@@ -919,20 +407,5 @@ mod tests {
         assert_eq!(prog[2].k, 0);
         assert_eq!(prog[3].code, BPF_RET | BPF_K);
         assert_eq!(prog[3].k, 0xFFFF);
-    }
-
-    #[test]
-    fn test_ruuvi_bpf_program_structure() {
-        let prog = ruuvi_bpf_program();
-        assert_eq!(prog.len(), NUM_OFFSETS * 2 + 9);
-        assert_eq!(prog[0].code, BPF_LD | BPF_B | BPF_ABS);
-        assert_eq!(prog[0].k, 0);
-        assert_eq!(prog[1].code, BPF_JMP | BPF_JEQ | BPF_K);
-        assert_eq!(prog[1].k, HCI_EVENT_PKT as u32);
-        let last = prog.len() - 1;
-        assert_eq!(prog[last - 1].code, BPF_RET | BPF_K);
-        assert_eq!(prog[last - 1].k, 0); // reject
-        assert_eq!(prog[last].code, BPF_RET | BPF_K);
-        assert_eq!(prog[last].k, 0xFFFF); // accept
     }
 }
