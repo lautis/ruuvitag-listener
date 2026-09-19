@@ -43,6 +43,9 @@ const OCF_LE_SET_SCAN_ENABLE: u16 = 0x000C;
 const OCF_LE_SET_EXTENDED_SCAN_PARAMETERS: u16 = 0x0041;
 const OCF_LE_SET_EXTENDED_SCAN_ENABLE: u16 = 0x0042;
 
+// HCI error codes
+const HCI_ERR_COMMAND_DISALLOWED: u8 = 0x0c;
+
 // LE feature bits (from LE Read Local Supported Features)
 // Bit 12 (byte 1, bit 4) = LE Extended Advertising
 const LE_FEATURE_EXTENDED_ADVERTISING_BYTE: usize = 1;
@@ -608,6 +611,28 @@ fn read_command_complete(fd: &OwnedFd, expected_opcode: u16) -> Result<Vec<u8>, 
     }
 }
 
+/// Dispatch an HCI command and return its Command Complete status and event.
+///
+/// Unlike [`send_hci_command_checked`], this does not treat a non-zero status
+/// as an error, so callers can decide which status codes are acceptable.
+fn send_hci_command_with_status(
+    fd: &OwnedFd,
+    ogf: u16,
+    ocf: u16,
+    params: &[u8],
+) -> Result<(u8, Vec<u8>), ScanError> {
+    let packet = hci_command_packet(ogf, ocf, params);
+    send_hci_command(fd, &packet)?;
+
+    let event = read_command_complete(fd, (ogf << 10) | ocf)?;
+
+    // Status is the first return parameter, at byte 6.
+    let status = *event
+        .get(6)
+        .ok_or_else(|| ScanError::Bluetooth("Truncated HCI Command Complete event".to_string()))?;
+    Ok((status, event))
+}
+
 /// Send an HCI command and verify its Command Complete status is success.
 ///
 /// Returns the full Command Complete event so callers can read additional
@@ -619,22 +644,13 @@ fn send_hci_command_checked(
     ocf: u16,
     params: &[u8],
 ) -> Result<Vec<u8>, ScanError> {
-    let packet = hci_command_packet(ogf, ocf, params);
-    send_hci_command(fd, &packet)?;
-
     let opcode = (ogf << 10) | ocf;
-    let event = read_command_complete(fd, opcode)?;
-
-    // Status is the first return parameter, at byte 6.
-    let status = *event
-        .get(6)
-        .ok_or_else(|| ScanError::Bluetooth("Truncated HCI Command Complete event".to_string()))?;
+    let (status, event) = send_hci_command_with_status(fd, ogf, ocf, params)?;
     if status != 0 {
         return Err(ScanError::Bluetooth(format!(
             "HCI command {opcode:#06x} failed with status {status:#04x}"
         )));
     }
-
     Ok(event)
 }
 
@@ -670,8 +686,9 @@ fn configure_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
 fn configure_legacy_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
     // Setting scan parameters is rejected with "Command Disallowed" while
     // scanning is already active (e.g. bluetoothd is running a discovery), so
-    // disable scanning first. Disabling when already disabled is a harmless
-    // no-op.
+    // disable scanning first. Disabling an already-disabled scan is a no-op
+    // that some controllers reject with "Command Disallowed"; that status is
+    // tolerated on the disable path.
     set_legacy_scan_enable(fd, false)?;
 
     // Set scan parameters: passive scan, 200ms interval, 200ms window
@@ -713,7 +730,29 @@ fn set_legacy_scan_enable(fd: &OwnedFd, enable: bool) -> Result<(), ScanError> {
         )
     };
 
-    send_hci_command_checked(fd, OGF_LE_CTL, OCF_LE_SET_SCAN_ENABLE, bytes)?;
+    send_scan_enable(fd, OCF_LE_SET_SCAN_ENABLE, bytes, enable)
+}
+
+/// Whether a returned status is acceptable for an LE scan enable/disable
+/// command.
+///
+/// Disabling an already-disabled scan is a no-op that some controllers reject
+/// with `Command Disallowed` (e.g. Broadcom BCM43455), so that status is
+/// tolerated when disabling.
+fn scan_enable_status_ok(enable: bool, status: u8) -> bool {
+    status == 0 || (!enable && status == HCI_ERR_COMMAND_DISALLOWED)
+}
+
+/// Send an LE scan enable/disable command, tolerating `Command Disallowed`
+/// when disabling an already-disabled scan.
+fn send_scan_enable(fd: &OwnedFd, ocf: u16, params: &[u8], enable: bool) -> Result<(), ScanError> {
+    let opcode = (OGF_LE_CTL << 10) | ocf;
+    let (status, _event) = send_hci_command_with_status(fd, OGF_LE_CTL, ocf, params)?;
+    if !scan_enable_status_ok(enable, status) {
+        return Err(ScanError::Bluetooth(format!(
+            "HCI command {opcode:#06x} failed with status {status:#04x}"
+        )));
+    }
     Ok(())
 }
 
@@ -726,8 +765,9 @@ fn set_legacy_scan_enable(fd: &OwnedFd, enable: bool) -> Result<(), ScanError> {
 fn configure_extended_le_scan(fd: &OwnedFd) -> Result<(), ScanError> {
     // Setting scan parameters is rejected with "Command Disallowed" while
     // scanning is already active (e.g. bluetoothd is running a discovery), so
-    // disable scanning first. Disabling when already disabled is a harmless
-    // no-op.
+    // disable scanning first. Disabling an already-disabled scan is a no-op
+    // that some controllers reject with "Command Disallowed"; that status is
+    // tolerated on the disable path.
     set_extended_scan_enable(fd, false)?;
 
     let params = LeSetExtendedScanParametersCmd {
@@ -774,8 +814,7 @@ fn set_extended_scan_enable(fd: &OwnedFd, enable: bool) -> Result<(), ScanError>
         )
     };
 
-    send_hci_command_checked(fd, OGF_LE_CTL, OCF_LE_SET_EXTENDED_SCAN_ENABLE, bytes)?;
-    Ok(())
+    send_scan_enable(fd, OCF_LE_SET_EXTENDED_SCAN_ENABLE, bytes, enable)
 }
 
 /// Quick check if a packet might contain Ruuvi manufacturer data.
@@ -1051,6 +1090,19 @@ mod tests {
 
         assert_eq!(packet[0], 0x01); // Command packet type
         assert_eq!(packet.len(), 6); // Header + 2 params
+    }
+
+    #[test]
+    fn test_scan_enable_status_ok() {
+        // Success is always acceptable.
+        assert!(scan_enable_status_ok(true, 0x00));
+        assert!(scan_enable_status_ok(false, 0x00));
+        // Disabling an already-disabled scan may be rejected with Command Disallowed.
+        assert!(scan_enable_status_ok(false, HCI_ERR_COMMAND_DISALLOWED));
+        // Enabling must always succeed.
+        assert!(!scan_enable_status_ok(true, HCI_ERR_COMMAND_DISALLOWED));
+        // Other errors are never tolerated.
+        assert!(!scan_enable_status_ok(false, 0x0f));
     }
 
     #[test]
