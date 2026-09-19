@@ -72,15 +72,5 @@ const RUUVI_MANUFACTURER_ID_LE: [u8; 2] = [
     (RUUVI_MANUFACTURER_ID >> 8) as u8,
 ];
 
-// BPF instruction codes
-const BPF_LD: u16 = 0x00;
-const BPF_JMP: u16 = 0x05;
-const BPF_RET: u16 = 0x06;
-const BPF_H: u16 = 0x08; // Half-word (16-bit)
-const BPF_B: u16 = 0x10; // Byte
-const BPF_ABS: u16 = 0x20;
-const BPF_JEQ: u16 = 0x10;
-const BPF_K: u16 = 0x00;
-
 /// Sysfs directory where the kernel exposes registered HCI controllers.
 const HCI_SYSFS_CLASS: &str = "/sys/class/bluetooth";
