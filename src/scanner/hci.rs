@@ -18,7 +18,8 @@ use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
 use tokio::io::unix::AsyncFd;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 // HCI protocol constants
 const BTPROTO_HCI: c_int = 1;
@@ -1021,7 +1022,8 @@ pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSe
     configure_le_scan(&cmd_fd)?;
 
     let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
-    let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
 
     // Wrap in AsyncFd for async I/O
     let async_fd = AsyncFd::new(fd)
@@ -1036,7 +1038,7 @@ pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSe
         loop {
             tokio::select! {
                 // Graceful shutdown requested by the scan session.
-                _ = &mut stop_rx => break,
+                _ = task_cancel.cancelled() => break,
                 // Wait for the socket to be readable
                 result = async_fd.readable() => {
                     let mut guard = match result {
@@ -1107,7 +1109,7 @@ pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSe
         }
     });
 
-    Ok(ScanSession::managed(rx, stop_tx, task))
+    Ok(ScanSession::managed(rx, cancel, task))
 }
 
 #[cfg(test)]

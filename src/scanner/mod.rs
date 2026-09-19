@@ -18,8 +18,9 @@ use ruuvi_sensor_protocol::{
 };
 use std::time::SystemTime;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 /// A running BLE scan: the measurement stream plus graceful-stop plumbing.
 ///
@@ -35,8 +36,10 @@ use tokio::task::JoinHandle;
 pub struct ScanSession {
     /// Receiver for measurements (or decode errors when verbose).
     pub measurements: mpsc::Receiver<MeasurementResult>,
-    /// Signal sent to the backend task to stop scanning gracefully.
-    stop: Option<oneshot::Sender<()>>,
+    /// Cancellation signal used to ask the backend task to stop scanning
+    /// gracefully. `cancel()` is idempotent, so calling [`Self::stop`] more
+    /// than once is harmless.
+    cancel: CancellationToken,
     /// Join handle for the backend task.
     task: Option<JoinHandle<()>>,
 }
@@ -44,17 +47,16 @@ pub struct ScanSession {
 impl ScanSession {
     /// Wrap a scan managed by a backend task.
     ///
-    /// `stop` informs the task that the scan should end; the task is expected
-    /// to disable the adapter's scan (and do any other cleanup) before
-    /// finishing.
+    /// `cancel` requests the task to stop scanning; the task is expected to
+    /// disable the adapter's scan (and do any other cleanup) before finishing.
     pub fn managed(
         measurements: mpsc::Receiver<MeasurementResult>,
-        stop: oneshot::Sender<()>,
+        cancel: CancellationToken,
         task: JoinHandle<()>,
     ) -> Self {
         Self {
             measurements,
-            stop: Some(stop),
+            cancel,
             task: Some(task),
         }
     }
@@ -63,16 +65,14 @@ impl ScanSession {
     pub fn unmanaged(measurements: mpsc::Receiver<MeasurementResult>) -> Self {
         Self {
             measurements,
-            stop: None,
+            cancel: CancellationToken::new(),
             task: None,
         }
     }
 
     /// Ask the backend to stop scanning and wait until its cleanup completes.
     pub async fn stop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
+        self.cancel.cancel();
         if let Some(task) = self.task.take() {
             let _ = task.await;
         }

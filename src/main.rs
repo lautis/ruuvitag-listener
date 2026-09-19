@@ -1,12 +1,11 @@
 use clap::Parser;
 use std::future::Future;
 use std::panic::{self, PanicHookInfo};
-use std::sync::Arc;
 
 use ruuvitag_listener::app::{Options, RealScanner, RunError, run_with_io};
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal as unix_signal};
-use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 /// Exit codes for the application
 const EXIT_SUCCESS: i32 = 0;
@@ -70,7 +69,7 @@ async fn main() {
     // measurements. `run_with_io` then stops the scan so the HCI backend can
     // tell the adapter to disable its LE scan (closing the socket alone does
     // not stop scanning) and the BlueZ backend can end discovery.
-    let shutdown = Arc::new(Notify::new());
+    let shutdown = CancellationToken::new();
     let signal_shutdown = shutdown.clone();
     tokio::spawn(async move {
         tokio::select! {
@@ -78,10 +77,10 @@ async fn main() {
             _ = wait_for_sigterm() => {}
         }
         eprintln!("received termination signal, stopping scan");
-        signal_shutdown.notify_one();
+        signal_shutdown.cancel();
     });
 
-    match run(options, shutdown.notified()).await {
+    match run(options, shutdown.cancelled()).await {
         Ok(_) => std::process::exit(EXIT_SUCCESS),
         Err(why) => {
             eprintln!("error: {}", why);

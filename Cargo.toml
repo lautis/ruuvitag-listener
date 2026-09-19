@@ -18,6 +18,7 @@ bluer = { version = "0.17", features = ["bluetoothd"], optional = true }
 libc = { version = "0.2", optional = true }
 ruuvi-sensor-protocol = "0.7.0"
 tokio = { version = "1", features = ["rt", "macros", "sync", "signal"] }
+tokio-util = { version = "0.7", default-features = false }
 futures = { version = "0.3", optional = true }
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"

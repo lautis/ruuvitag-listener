@@ -10,7 +10,8 @@ use super::{
 use crate::mac_address::MacAddress;
 use bluer::{Adapter, AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport, Session};
 use futures::StreamExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 impl From<bluer::Error> for ScanError {
     fn from(err: bluer::Error) -> Self {
@@ -64,7 +65,8 @@ pub async fn start_scan(
         .await?;
 
     let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
-    let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
 
     // `discover_devices_with_changes` re-emits a `DeviceAdded` event for a
     // device each time its properties change, giving us one notification per
@@ -80,7 +82,7 @@ pub async fn start_scan(
         loop {
             tokio::select! {
                 // Graceful shutdown requested by the scan session.
-                _ = &mut stop_rx => break,
+                _ = task_cancel.cancelled() => break,
                 event = events.next() => match event {
                     Some(AdapterEvent::DeviceAdded(address)) => {
                         if let Err(e) = process_device(&adapter, address, &tx, verbose).await
@@ -109,7 +111,7 @@ pub async fn start_scan(
         // BlueZ stop discovery on the adapter.
     });
 
-    Ok(ScanSession::managed(rx, stop_tx, task))
+    Ok(ScanSession::managed(rx, cancel, task))
 }
 
 /// Process a discovered Bluetooth device and extract RuuviTag measurements.
