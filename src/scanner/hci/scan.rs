@@ -3,7 +3,7 @@
 
 use super::bpf::set_bpf_ruuvi_filter;
 use super::ffi::{HciSocket, configure_le_scan, disable_le_scan, read_packet};
-use super::parse::{might_be_ruuvi, parse_advertising_report, parse_extended_advertising_report};
+use super::parse::parse_event;
 use super::*;
 use crate::scanner::{MEASUREMENT_CHANNEL_BUFFER_SIZE, ScanError, ScanSession};
 use std::io;
@@ -144,28 +144,17 @@ pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSe
                             }
                         };
 
-                        // Check if this is an LE advertising report that might be from a
-                        // RuuviTag. Controllers emit legacy reports (0x02) or, in
-                        // extended/Bluetooth 5 mode, extended reports (0x0D).
-                        if n >= HCI_EVENT_HEADER_LEN && buf[0] == HCI_EVENT_PKT && buf[1] == EVT_LE_META_EVENT {
-                            let subevent = buf[3];
-                            // Quick check for Ruuvi manufacturer ID before expensive parsing
-                            let result = if !might_be_ruuvi(&buf[..n]) {
-                                None
-                            } else if subevent == EVT_LE_ADVERTISING_REPORT {
-                                parse_advertising_report(&buf[..n], verbose)
-                            } else if subevent == EVT_LE_EXTENDED_ADVERTISING_REPORT {
-                                parse_extended_advertising_report(&buf[..n], verbose)
-                            } else {
-                                None
-                            };
+                        // Parse any Ruuvi advertising report in this event;
+                        // parse_event drops everything that is not one
+                        // (non-LE-Meta-Events, non-Ruuvi payloads, unknown
+                        // subevents).
+                        let result = parse_event(&buf[..n], verbose);
 
-                            if let Some(result) = result
-                                && (result.is_ok() || verbose)
-                                && tx.send(result).await.is_err()
-                            {
-                                break 'receive; // consumer gone, stop scanning
-                            }
+                        if let Some(result) = result
+                            && (result.is_ok() || verbose)
+                            && tx.send(result).await.is_err()
+                        {
+                            break 'receive; // consumer gone, stop scanning
                         }
                     }
                 }

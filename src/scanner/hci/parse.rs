@@ -1,5 +1,5 @@
-//! Pure HCI packet parsing: LE advertising-report parsers and Ruuvi
-//! manufacturer-data decoding.
+//! Pure HCI packet parsing: LE Meta Event dispatch and advertising-report
+//! decoding into RuuviTag measurements.
 
 use super::*;
 use crate::mac_address::MacAddress;
@@ -120,6 +120,25 @@ fn too_short(verbose: bool) -> Option<MeasurementResult> {
     }
 }
 
+/// Dispatch one HCI event: parse it as a legacy or extended advertising
+/// report when the packet is an LE Meta Event that might carry Ruuvi data.
+pub(crate) fn parse_event(data: &[u8], verbose: bool) -> Option<MeasurementResult> {
+    // Fast path: drop anything that is not an LE Meta Event or cannot contain
+    // the Ruuvi manufacturer ID before doing any real parsing.
+    if data.len() < HCI_EVENT_HEADER_LEN
+        || data[0] != HCI_EVENT_PKT
+        || data[1] != EVT_LE_META_EVENT
+        || !might_be_ruuvi(data)
+    {
+        return None;
+    }
+    match data[3] {
+        EVT_LE_ADVERTISING_REPORT => parse_advertising_report(data, verbose),
+        EVT_LE_EXTENDED_ADVERTISING_REPORT => parse_extended_advertising_report(data, verbose),
+        _ => None,
+    }
+}
+
 /// Walk the AD structures of an advertisement and decode any RuuviTag
 /// manufacturer data found.
 ///
@@ -189,31 +208,61 @@ mod tests {
         data
     }
 
-    #[test]
-    fn test_parse_extended_advertising_report() {
+    /// AD structure for a Ruuvi payload: [len][type=0xFF][payload...].
+    fn ruuvi_ad_structure() -> Vec<u8> {
         let payload = ruuvi_rawv2_payload();
-        // AD structure: [len][type=0xFF][payload...]
         let mut ad = vec![(payload.len() + 1) as u8, AD_TYPE_MANUFACTURER_DATA];
         ad.extend_from_slice(&payload);
+        ad
+    }
 
-        // HCI header + extended report header + data
+    /// A full legacy advertising report (subevent 0x02) carrying a Ruuvi
+    /// payload, with `rssi` as the trailing RSSI byte.
+    fn legacy_ruuvi_report(rssi: u8) -> Vec<u8> {
+        let mut pkt = vec![
+            HCI_EVENT_PKT,
+            EVT_LE_META_EVENT,
+            0x00,
+            EVT_LE_ADVERTISING_REPORT,
+        ];
+        pkt.push(0x01); // num reports
+        pkt.push(0x00); // event_type
+        pkt.push(0x00); // address_type
+        pkt.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]); // address (LE)
+        let ad = ruuvi_ad_structure();
+        pkt.push(ad.len() as u8); // data_len
+        pkt.extend_from_slice(&ad);
+        pkt.push(rssi);
+        pkt
+    }
+
+    /// A full extended advertising report (subevent 0x0D) carrying a Ruuvi
+    /// payload, with RSSI 0xC3 (-61 dBm) in the per-report header.
+    fn extended_ruuvi_report() -> Vec<u8> {
         let mut pkt = vec![
             HCI_EVENT_PKT,
             EVT_LE_META_EVENT,
             0x00,
             EVT_LE_EXTENDED_ADVERTISING_REPORT,
         ];
-        pkt.push(0x01); // num_reports
+        pkt.push(0x01); // num reports
         pkt.extend_from_slice(&[0x00, 0x00]); // event_type
         pkt.push(0x00); // address_type
         pkt.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]); // address (LE)
-        pkt.extend_from_slice(&[0x01, 0x01, 0x00, 0x7F, 0xC3]); // primary/secondary phy, sid, tx_power, rssi
+        // primary/secondary phy, sid, tx_power, rssi
+        pkt.extend_from_slice(&[0x01, 0x01, 0x00, 0x7F, 0xC3]);
         pkt.extend_from_slice(&[0x00, 0x00]); // periodic interval
         pkt.push(0x00); // direct_address_type
         pkt.extend_from_slice(&[0x00; 6]); // direct_address
+        let ad = ruuvi_ad_structure();
         pkt.push(ad.len() as u8); // data_length
         pkt.extend_from_slice(&ad);
+        pkt
+    }
 
+    #[test]
+    fn test_parse_extended_advertising_report() {
+        let pkt = extended_ruuvi_report();
         assert!(might_be_ruuvi(&pkt));
         let result = parse_extended_advertising_report(&pkt, false);
         assert!(result.is_some(), "expected a RuuviTag measurement");
@@ -228,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_extended_report_too_short() {
+    fn test_parse_report_too_short_verbose_error() {
         // HCI header + subevent + a truncated per-report body.
         let mut pkt = vec![
             HCI_EVENT_PKT,
@@ -236,76 +285,58 @@ mod tests {
             0x00,
             EVT_LE_EXTENDED_ADVERTISING_REPORT,
         ];
-        pkt.push(0x01); // num_reports
+        pkt.push(0x01); // num reports
         pkt.extend_from_slice(&[0x00; 15]); // truncated per-report body
         assert_eq!(pkt.len(), 20);
 
-        let verbose_result = parse_extended_advertising_report(&pkt, true);
-        assert!(matches!(
-            verbose_result,
-            Some(Err(DecodeError::InvalidData(_)))
-        ));
         assert_eq!(
-            verbose_result,
+            parse_extended_advertising_report(&pkt, true),
             Some(Err(DecodeError::InvalidData(
                 "Advertising report too short".into()
             )))
         );
-
-        let silent_result = parse_extended_advertising_report(&pkt, false);
-        assert!(silent_result.is_none());
+        assert!(parse_extended_advertising_report(&pkt, false).is_none());
     }
 
     #[test]
     fn test_parse_legacy_advertising_report_with_rssi() {
-        let payload = ruuvi_rawv2_payload();
-        let mut ad = vec![(payload.len() + 1) as u8, AD_TYPE_MANUFACTURER_DATA];
-        ad.extend_from_slice(&payload);
-
-        // HCI header + legacy report header, data, and a trailing RSSI byte.
-        let mut pkt = vec![
-            HCI_EVENT_PKT,
-            EVT_LE_META_EVENT,
-            0x00,
-            EVT_LE_ADVERTISING_REPORT,
-        ];
-        pkt.push(0x01); // num_reports
-        pkt.push(0x00); // event_type
-        pkt.push(0x00); // address_type
-        pkt.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]); // address (LE)
-        pkt.push(ad.len() as u8); // data_len
-        pkt.extend_from_slice(&ad);
-        pkt.push(0xB0); // RSSI = -80 dBm
-
+        let pkt = legacy_ruuvi_report(0xB0); // RSSI = -80 dBm
         assert!(might_be_ruuvi(&pkt));
-        let result = parse_advertising_report(&pkt, false);
-        let measurement = result.unwrap().expect("payload should decode");
+        let measurement = parse_advertising_report(&pkt, false)
+            .unwrap()
+            .expect("payload should decode");
         assert_eq!(measurement.rssi, Some(-80));
     }
 
     #[test]
     fn test_parse_report_maps_rssi_sentinel_to_none() {
-        let payload = ruuvi_rawv2_payload();
-        let mut ad = vec![(payload.len() + 1) as u8, AD_TYPE_MANUFACTURER_DATA];
-        ad.extend_from_slice(&payload);
-
         // Legacy report whose RSSI byte is the 127 "not available" sentinel.
-        let mut pkt = vec![
-            HCI_EVENT_PKT,
-            EVT_LE_META_EVENT,
-            0x00,
-            EVT_LE_ADVERTISING_REPORT,
-        ];
-        pkt.push(0x01);
-        pkt.push(0x00);
-        pkt.push(0x00);
-        pkt.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
-        pkt.push(ad.len() as u8);
-        pkt.extend_from_slice(&ad);
-        pkt.push(RSSI_UNAVAILABLE as u8);
-
-        let result = parse_advertising_report(&pkt, false);
-        let measurement = result.unwrap().expect("payload should decode");
+        let pkt = legacy_ruuvi_report(RSSI_UNAVAILABLE as u8);
+        let measurement = parse_advertising_report(&pkt, false)
+            .unwrap()
+            .expect("payload should decode");
         assert_eq!(measurement.rssi, None);
+    }
+
+    #[test]
+    fn test_parse_event_dispatches_advertising_reports() {
+        assert!(parse_event(&legacy_ruuvi_report(0xB0), false).is_some());
+        assert!(parse_event(&extended_ruuvi_report(), false).is_some());
+
+        // A valid report carrying a different manufacturer ID is dropped before
+        // the payload is touched.
+        let mut pkt = legacy_ruuvi_report(0xB0);
+        pkt[15] = 0x12; // first byte of the Ruuvi ID inside the AD payload
+        pkt[16] = 0x34;
+        assert!(parse_event(&pkt, false).is_none());
+
+        // A wrong event code or unknown subevent never reaches the parsers.
+        let mut pkt = legacy_ruuvi_report(0xB0);
+        pkt[1] = 0x05; // not an LE Meta Event
+        assert!(parse_event(&pkt, false).is_none());
+
+        let mut pkt = legacy_ruuvi_report(0xB0);
+        pkt[3] = 0x0B; // unknown subevent
+        assert!(parse_event(&pkt, false).is_none());
     }
 }
