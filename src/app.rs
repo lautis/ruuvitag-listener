@@ -231,6 +231,11 @@ pub async fn run_with_io(
                 // All senders dropped: the scan ended on its own.
                 None => break,
             },
+            warning = session.warnings.recv() => {
+                if let Some(warning) = warning {
+                    writeln!(err, "{warning}")?;
+                }
+            },
             () = &mut stop => break,
         }
     }
@@ -240,6 +245,12 @@ pub async fn run_with_io(
     // --hci-scan-exit-behavior says to leave a scan running; the BlueZ backend
     // ends the discovery session).
     session.stop().await;
+
+    // The loop stopped listening during shutdown, so surface warnings the
+    // backend emitted while it was stopping (e.g. a failed LE scan disable).
+    while let Ok(warning) = session.warnings.try_recv() {
+        writeln!(err, "{warning}")?;
+    }
 
     Ok(())
 }

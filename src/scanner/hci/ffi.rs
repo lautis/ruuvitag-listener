@@ -8,6 +8,7 @@ use std::io;
 use std::mem;
 use std::ops::Deref;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use tokio::sync::mpsc;
 
 // HCI socket protocols and options
 const BTPROTO_HCI: c_int = 1;
@@ -577,7 +578,8 @@ pub(crate) fn disable_le_scan(fd: &HciSocket, mode: ScanMode) -> Result<(), Scan
 /// owned the scan may have stopped it while this process was running, and
 /// setting `Filter_Duplicates` means sending `LE Set Scan Enable`, which
 /// re-enables scanning as a side effect. When that has happened there is
-/// nothing to put back, so nothing is sent and the reason is logged.
+/// nothing to put back, so nothing is sent and the reason is reported as a
+/// warning.
 ///
 /// The scan is cycled rather than re-enabled in place. A controller that
 /// rejects a redundant `LE Set Scan Enable` answers `Command Disallowed` (see
@@ -589,9 +591,11 @@ pub(crate) fn restore_le_scan_duplicates(
     fd: &HciSocket,
     mode: ScanMode,
     filter_duplicates: bool,
+    warn_tx: &mpsc::UnboundedSender<String>,
 ) -> Result<(), ScanError> {
     if !le_scan_state(fd)?.enabled {
-        eprintln!("LE scan stopped while we ran; not restoring its duplicate policy");
+        let _ = warn_tx
+            .send("LE scan stopped while we ran; not restoring its duplicate policy".to_string());
         return Ok(());
     }
     set_scan_enable_with_duplicates(fd, mode, false, false)?;

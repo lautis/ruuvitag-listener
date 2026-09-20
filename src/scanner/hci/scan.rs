@@ -78,6 +78,7 @@ async fn drain_events(
     guard: &mut AsyncFdReadyGuard<'_, HciSocket>,
     buf: &mut [u8; HCI_EVENT_BUF_SIZE],
     tx: &mpsc::Sender<MeasurementResult>,
+    warn_tx: &mpsc::UnboundedSender<String>,
     verbose: bool,
 ) -> bool {
     loop {
@@ -85,7 +86,7 @@ async fn drain_events(
             Ok(Ok(0)) | Err(_) => return true, // EOF or no more buffered data
             Ok(Ok(n)) => n,
             Ok(Err(e)) => {
-                eprintln!("failed to read HCI event: {e}");
+                let _ = warn_tx.send(format!("failed to read HCI event: {e}"));
                 return false;
             }
         };
@@ -196,18 +197,20 @@ pub async fn start_scan(
     let cmd_socket = HciSocket::open(dev_id)?;
     cmd_socket.set_command_filter()?;
 
+    let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
+    let (warn_tx, warn_rx) = mpsc::unbounded_channel::<String>();
+
     // Settle what shutdown will do before the scan is configured, since
     // configuring it replaces any scan already running. If the query fails we
     // assume the controller was idle, so the scan we are about to start counts
     // as ours.
     let prior = le_scan_state(&cmd_socket).unwrap_or_else(|e| {
-        eprintln!("failed to query LE scan state: {e}");
+        let _ = warn_tx.send(format!("failed to query LE scan state: {e}"));
         ScanState::default()
     });
     let shutdown = scan_exit.shutdown_for(prior);
     let mode = configure_le_scan(&cmd_socket)?;
 
-    let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
 
@@ -233,7 +236,7 @@ pub async fn start_scan(
                     };
 
                     // Drain all available packets before waiting again.
-                    if !drain_events(&mut guard, &mut buf, &tx, verbose).await {
+                    if !drain_events(&mut guard, &mut buf, &tx, &warn_tx, verbose).await {
                         break 'receive;
                     }
                 }
@@ -254,14 +257,14 @@ pub async fn start_scan(
             // leaving it running, so its owner does not silently inherit ours.
             ScanShutdown::LeaveRunning {
                 filter_duplicates: Some(policy),
-            } => restore_le_scan_duplicates(&cmd_socket, mode, policy),
+            } => restore_le_scan_duplicates(&cmd_socket, mode, policy, &warn_tx),
         };
         if let Err(e) = finished {
-            eprintln!("failed to finish the LE scan on hci{dev_id}: {e}");
+            let _ = warn_tx.send(format!("failed to finish the LE scan on hci{dev_id}: {e}"));
         }
     });
 
-    Ok(ScanSession::managed(rx, cancel, task))
+    Ok(ScanSession::managed(rx, warn_rx, cancel, task))
 }
 
 #[cfg(test)]

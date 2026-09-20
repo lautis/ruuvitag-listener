@@ -65,6 +65,9 @@ pub async fn start_scan(
         .await?;
 
     let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
+    // The BlueZ backend never reports warnings, so drop the sender.
+    let (warn_tx, warn_rx) = mpsc::unbounded_channel::<String>();
+    drop(warn_tx);
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
 
@@ -111,7 +114,7 @@ pub async fn start_scan(
         // BlueZ stop discovery on the adapter.
     });
 
-    Ok(ScanSession::managed(rx, cancel, task))
+    Ok(ScanSession::managed(rx, warn_rx, cancel, task))
 }
 
 /// Process a discovered Bluetooth device and extract RuuviTag measurements.
