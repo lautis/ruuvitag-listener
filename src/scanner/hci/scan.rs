@@ -2,7 +2,7 @@
 //! event read loop.
 
 use super::bpf::set_bpf_ruuvi_filter;
-use super::ffi::{HciSocket, configure_le_scan, disable_le_scan, read_packet};
+use super::ffi::{HciSocket, ScanOwnership, configure_le_scan, disable_le_scan, read_packet};
 use super::parse::parse_event;
 use super::*;
 use crate::scanner::{MEASUREMENT_CHANNEL_BUFFER_SIZE, ScanError, ScanSession};
@@ -85,9 +85,9 @@ fn resolve_adapter(name: &str) -> Result<u16, ScanError> {
 ///
 /// # Returns
 /// A scan session whose `measurements` receiver yields measurements (or decode
-/// errors if verbose). Stopping the session (`ScanSession::stop`) makes the
-/// backend send the LE Scan disable command, which is required on Linux to
-/// actually end the adapter's scan.
+/// errors if verbose). Stopping the session (`ScanSession::stop`) disables the
+/// adapter's scan when this process started it; a scan that was already
+/// running on startup is left to its original owner.
 ///
 /// # Requirements
 /// - CAP_NET_RAW and CAP_NET_ADMIN capabilities or root privileges
@@ -108,7 +108,7 @@ pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSe
     // back command results and detect Bluetooth 5 extended-advertising support.
     let cmd_socket = HciSocket::open(dev_id)?;
     cmd_socket.set_command_filter()?;
-    configure_le_scan(&cmd_socket)?;
+    let ownership = configure_le_scan(&cmd_socket)?;
 
     let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
     let cancel = CancellationToken::new();
@@ -164,10 +164,11 @@ pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSe
             }
         }
 
-        // Tell the controller to stop scanning. Without this the adapter keeps
-        // scanning after the process exits, wasting power and interfering with
-        // other connections.
-        if let Err(e) = disable_le_scan(&cmd_socket) {
+        // Only stop a scan we started ourselves; a pre-existing scan is left
+        // running for whoever started it.
+        if matches!(ownership, ScanOwnership::Owned)
+            && let Err(e) = disable_le_scan(&cmd_socket)
+        {
             eprintln!("failed to disable LE scan: {e}");
         }
     });

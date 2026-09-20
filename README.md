@@ -99,9 +99,11 @@ Running `ruuvitag-listener` will output measurements to STDOUT until interrupted
 
 On SIGINT (Ctrl-C) or SIGTERM the process shuts down gracefully: it asks the
 scanner backend to stop scanning before exiting. The HCI backend sends the
-`LE Set Scan Enable (disable)` command (closing the raw socket alone would
-leave the adapter scanning), and the BlueZ backend ends its discovery
-session, which makes BlueZ stop discovery on the adapter.
+`LE Set Scan Enable (disable)` command only when this process started the
+scan itself (closing the raw socket alone would leave the adapter scanning).
+If the adapter was already scanning when the process started, that scan
+belongs to whoever started it and is left running. The BlueZ backend ends its
+discovery session, which makes BlueZ stop discovery on the adapter.
 
 Example output:
 

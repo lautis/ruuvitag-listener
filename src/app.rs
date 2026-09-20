@@ -211,8 +211,10 @@ pub async fn run_with_io(
     }
 
     // Graceful shutdown: ask the backend to stop scanning and wait for it to
-    // finish (the HCI backend disables the adapter's LE scan here; the BlueZ
-    // backend ends the discovery session).
+    // finish (the HCI backend disables the adapter's LE scan here — unless
+    // the scan was already running before this process started, in which case
+    // it is left to its original owner; the BlueZ backend ends the discovery
+    // session).
     session.stop().await;
 
     Ok(())

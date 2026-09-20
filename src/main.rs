@@ -23,7 +23,9 @@ const EXIT_PANIC: i32 = 2;
 ///
 /// On SIGINT (Ctrl-C) or SIGTERM, `stop` resolves and the run loop ends,
 /// giving the scanner backend a chance to disable the adapter's LE scan
-/// before the process exits.
+/// before the process exits. When the adapter was already scanning before
+/// this process started, that scan belongs to another process and is left
+/// running instead.
 ///
 /// # Arguments
 /// * `run_options` - Command-line options parsed from user input

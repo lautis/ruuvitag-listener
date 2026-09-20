@@ -18,6 +18,7 @@ const OGF_LE_CTL: u16 = 0x08;
 const OCF_LE_READ_LOCAL_SUPPORTED_FEATURES: u16 = 0x0003;
 const OCF_LE_SET_SCAN_PARAMETERS: u16 = 0x000B;
 const OCF_LE_SET_SCAN_ENABLE: u16 = 0x000C;
+const OCF_LE_READ_SCAN_ENABLE: u16 = 0x000D;
 const OCF_LE_SET_EXTENDED_SCAN_PARAMETERS: u16 = 0x0041;
 const OCF_LE_SET_EXTENDED_SCAN_ENABLE: u16 = 0x0042;
 
@@ -45,6 +46,10 @@ const COMMAND_TIMEOUT_MS: u64 = 1000;
 
 /// LE scan interval and window: 200 ms in 0.625 ms units (0x140 = 320 ticks).
 const SCAN_200MS: u16 = 0x0140;
+
+// LE_Scan_Enable value (byte 7 of an LE Read Scan Enable response) that means
+// the controller is actively scanning.
+const HCI_SCAN_ENABLED: u8 = 0x01;
 
 /// Owned raw HCI socket bound to one controller.
 pub(crate) struct HciSocket {
@@ -373,6 +378,23 @@ fn controller_supports_extended_scan(fd: &HciSocket) -> Result<bool, ScanError> 
     }
 }
 
+/// Whether an `LE Read Scan Enable` Command Complete response reports active
+/// scanning. The status byte (6) is known to be success by the caller; byte 7
+/// carries LE_Scan_Enable, byte 8 Filter_Duplicates.
+fn scan_enabled(event: &[u8]) -> bool {
+    event.get(7).copied() == Some(HCI_SCAN_ENABLED)
+}
+
+/// Whether the controller currently has an LE scan enabled.
+///
+/// The `HCI_LE_Read_Scan_Enable` command (opcode 0x200D) reports the
+/// controller's current scan state regardless of which process started the
+/// scan, which lets the caller tell whether *it* is the scan's owner.
+fn le_scan_enabled(fd: &HciSocket) -> Result<bool, ScanError> {
+    let event = fd.command_checked(OGF_LE_CTL, OCF_LE_READ_SCAN_ENABLE, &[])?;
+    Ok(scan_enabled(&event))
+}
+
 /// Which LE scan command family to use: legacy (Bluetooth 4.x) vs extended
 /// (Bluetooth 5.x). Extended controllers only report advertisements via
 /// Extended Advertising Reports, so they must be driven with the extended
@@ -454,6 +476,19 @@ impl ScanMode {
     }
 }
 
+/// Whether [`configure_le_scan`] started the scan itself or joined one that
+/// was already running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScanOwnership {
+    /// This process enabled the scan (the controller was idle beforehand) and
+    /// must disable it on shutdown.
+    Owned,
+    /// The controller was already scanning when this process started; the
+    /// scan belongs to whoever started it and is left running on shutdown.
+    /// Note that attaching still replaced the original scan's parameters.
+    Shared,
+}
+
 /// Disable any active scan, set scan parameters, then enable scanning.
 ///
 /// The initial disable is required because setting scan parameters is rejected
@@ -461,11 +496,28 @@ impl ScanMode {
 /// a discovery). Disabling an already-disabled scan is a no-op that some
 /// controllers reject with "Command Disallowed" (e.g. Broadcom BCM43455); the
 /// disable path tolerates that status (see [`scan_enable_status_ok`]).
-fn configure_scan(fd: &HciSocket, mode: ScanMode) -> Result<(), ScanError> {
+///
+/// Returns [`ScanOwnership::Owned`] when the controller was idle beforehand,
+/// [`ScanOwnership::Shared`] when a scan was already active.
+fn configure_scan(fd: &HciSocket, mode: ScanMode) -> Result<ScanOwnership, ScanError> {
+    // If the read fails, assume the controller was idle: we own the scan we
+    // are about to start and shutdown still disables it (conservative default).
+    let was_active = match le_scan_enabled(fd) {
+        Ok(active) => active,
+        Err(e) => {
+            eprintln!("failed to query LE scan state: {e}");
+            false
+        }
+    };
     set_scan_enable(fd, mode, false)?;
     let params = mode.set_params_bytes();
     fd.command_checked(OGF_LE_CTL, mode.set_params_ocf(), &params)?;
-    set_scan_enable(fd, mode, true)
+    set_scan_enable(fd, mode, true)?;
+    if was_active {
+        Ok(ScanOwnership::Shared)
+    } else {
+        Ok(ScanOwnership::Owned)
+    }
 }
 
 /// Enable or disable LE scanning, tolerating "Command Disallowed" when
@@ -482,8 +534,8 @@ fn set_scan_enable(fd: &HciSocket, mode: ScanMode, enable: bool) -> Result<(), S
 }
 
 /// Configure LE scanning, preferring extended scanning when the controller
-/// supports it.
-pub(crate) fn configure_le_scan(fd: &HciSocket) -> Result<(), ScanError> {
+/// supports it. Returns the resulting [`ScanOwnership`].
+pub(crate) fn configure_le_scan(fd: &HciSocket) -> Result<ScanOwnership, ScanError> {
     configure_scan(fd, ScanMode::for_controller(fd)?)
 }
 
@@ -583,5 +635,21 @@ mod tests {
             ScanMode::Extended.enable_ocf(),
             OCF_LE_SET_EXTENDED_SCAN_ENABLE
         );
+    }
+
+    #[test]
+    fn test_scan_enabled_parses_command_complete() {
+        // Command Complete for LE Read Scan Enable (opcode 0x200d): status at
+        // byte 6, LE_Scan_Enable at byte 7, Filter_Duplicates at byte 8.
+        // LE_Scan_Enable = 0x00 → not scanning.
+        let disabled = [0x04u8, 0x0E, 0x06, 0x01, 0x0D, 0x20, 0x00, 0x00, 0x00];
+        assert!(!scan_enabled(&disabled));
+
+        // LE_Scan_Enable = 0x01 → scanning.
+        let enabled = [0x04u8, 0x0E, 0x06, 0x01, 0x0D, 0x20, 0x00, 0x01, 0x00];
+        assert!(scan_enabled(&enabled));
+
+        // A truncated event reads as "not scanning".
+        assert!(!scan_enabled(&[0x04, 0x0E]));
     }
 }
