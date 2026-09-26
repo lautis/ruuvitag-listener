@@ -99,11 +99,42 @@ Running `ruuvitag-listener` will output measurements to STDOUT until interrupted
 
 On SIGINT (Ctrl-C) or SIGTERM the process shuts down gracefully: it asks the
 scanner backend to stop scanning before exiting. The HCI backend sends the
-`LE Set Scan Enable (disable)` command only when this process started the
-scan itself (closing the raw socket alone would leave the adapter scanning).
-If the adapter was already scanning when the process started, that scan
-belongs to whoever started it and is left running. The BlueZ backend ends its
-discovery session, which makes BlueZ stop discovery on the adapter.
+`LE Set Scan Enable (disable)` command (closing the raw socket alone would
+leave the adapter scanning), and the BlueZ backend ends its discovery session,
+which makes BlueZ stop discovery on the adapter.
+
+The adapter's scan state is global, so a scan started by another process
+(bluetoothctl, bluetoothd discovery, a second listener) does not belong to the
+listener. `--hci-scan-exit-behavior` controls what happens to it on exit:
+
+| Behavior     | On exit                                                     |
+| ------------ | ----------------------------------------------------------- |
+| `owned-only` | Stop the scan only if this process started it (default)    |
+| `always`     | Always stop the scan, including one another process started |
+| `never`      | Never stop the scan; the adapter keeps scanning after exit  |
+
+```sh
+# This process owns the adapter: always leave it idle on exit
+ruuvitag-listener --backend hci --hci-scan-exit-behavior always
+```
+
+Attaching to an existing scan replaces its parameters regardless of this
+setting. On exit, the duplicate-filtering policy is the one parameter put back,
+because HCI lets a client read it; the scan interval, window, address type and
+filter policy stay as the listener set them, since there is no way to read those
+back. Putting the policy back cycles the scan (one disable/enable round trip),
+so the other process sees a brief gap. The option applies to the HCI backend
+only.
+
+### Upgrading from 0.8
+
+A listener that attached to a scan another process owned used to disable that
+scan when it exited. The default is now `--hci-scan-exit-behavior owned-only`,
+which leaves it running; pass `always` to restore the old unconditional stop.
+
+`Scanner::start_scan` takes a `ScanConfig` tuple instead of separate `backend`,
+`verbose` and `adapter` arguments, so implementations of that trait need
+updating.
 
 Example output:
 

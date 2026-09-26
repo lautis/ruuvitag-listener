@@ -2,10 +2,15 @@
 //! event read loop.
 
 use super::bpf::set_bpf_ruuvi_filter;
-use super::ffi::{HciSocket, ScanOwnership, configure_le_scan, disable_le_scan, read_packet};
+use super::ffi::{
+    HciSocket, ScanState, configure_le_scan, disable_le_scan, le_scan_state, read_packet,
+    restore_le_scan_duplicates,
+};
 use super::parse::parse_event;
 use super::*;
-use crate::scanner::{MEASUREMENT_CHANNEL_BUFFER_SIZE, ScanError, ScanSession};
+use crate::scanner::{
+    MEASUREMENT_CHANNEL_BUFFER_SIZE, ScanError, ScanExitBehavior, ScanSession, ScanShutdown,
+};
 use std::io;
 use std::path::Path;
 use tokio::io::unix::AsyncFd;
@@ -82,17 +87,24 @@ fn resolve_adapter(name: &str) -> Result<u16, ScanError> {
 /// # Arguments
 /// * `verbose` - If true, decode errors are sent as Err values; otherwise they're silently dropped.
 /// * `adapter` - Kernel adapter name (e.g. "hci1"), or `None` for `hci0`.
+/// * `scan_exit` - What to do with the adapter's LE scan on shutdown.
 ///
 /// # Returns
 /// A scan session whose `measurements` receiver yields measurements (or decode
 /// errors if verbose). Stopping the session (`ScanSession::stop`) disables the
-/// adapter's scan when this process started it; a scan that was already
-/// running on startup is left to its original owner.
+/// adapter's scan when [`ScanExitBehavior::OwnedOnly`] and this process started
+/// it, or unconditionally when the behavior is
+/// [`ScanExitBehavior::Always`]; a scan left to its original owner keeps
+/// running.
 ///
 /// # Requirements
 /// - CAP_NET_RAW and CAP_NET_ADMIN capabilities or root privileges
 /// - An available HCI device (typically hci0)
-pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSession, ScanError> {
+pub async fn start_scan(
+    verbose: bool,
+    adapter: Option<String>,
+    scan_exit: ScanExitBehavior,
+) -> Result<ScanSession, ScanError> {
     let dev_id = match adapter {
         Some(name) => resolve_adapter(&name)?,
         None => 0, // default to hci0, as before
@@ -108,7 +120,21 @@ pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSe
     // back command results and detect Bluetooth 5 extended-advertising support.
     let cmd_socket = HciSocket::open(dev_id)?;
     cmd_socket.set_command_filter()?;
-    let ownership = configure_le_scan(&cmd_socket)?;
+
+    // Settle what shutdown will do before the scan is configured, since
+    // configuring it replaces any scan already running. `always` does not need
+    // to know; if the query fails we assume the controller was idle, so the
+    // scan we are about to start counts as ours.
+    let prior = if scan_exit.needs_scan_state() {
+        le_scan_state(&cmd_socket).unwrap_or_else(|e| {
+            eprintln!("failed to query LE scan state: {e}");
+            ScanState::default()
+        })
+    } else {
+        ScanState::default()
+    };
+    let shutdown = scan_exit.resolve(prior.enabled);
+    configure_le_scan(&cmd_socket)?;
 
     let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
     let cancel = CancellationToken::new();
@@ -164,12 +190,30 @@ pub async fn start_scan(verbose: bool, adapter: Option<String>) -> Result<ScanSe
             }
         }
 
-        // Only stop a scan we started ourselves; a pre-existing scan is left
-        // running for whoever started it.
-        if matches!(ownership, ScanOwnership::Owned)
-            && let Err(e) = disable_le_scan(&cmd_socket)
-        {
-            eprintln!("failed to disable LE scan: {e}");
+        match shutdown {
+            ScanShutdown::Stop => {
+                if let Err(e) = disable_le_scan(&cmd_socket) {
+                    eprintln!("failed to disable LE scan: {e}");
+                }
+            }
+            // A scan this process started keeps the duplicate policy we set.
+            ScanShutdown::LeaveRunning => {}
+            // Someone else's scan: put their duplicate policy back before
+            // leaving it running, so its owner does not silently inherit ours.
+            ScanShutdown::RestoreAndLeaveRunning => {
+                match restore_le_scan_duplicates(&cmd_socket, prior.filter_duplicates) {
+                    Ok(true) => {}
+                    // Its owner stopped the scan while we ran. Re-enabling it
+                    // to restore the policy would start a scan nobody asked
+                    // for, so leave the controller idle.
+                    Ok(false) => {
+                        eprintln!(
+                            "LE scan is no longer running; not restoring its duplicate policy"
+                        )
+                    }
+                    Err(e) => eprintln!("failed to restore LE scan duplicate policy: {e}"),
+                }
+            }
         }
     });
 

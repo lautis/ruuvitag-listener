@@ -51,6 +51,11 @@ const SCAN_200MS: u16 = 0x0140;
 // the controller is actively scanning.
 const HCI_SCAN_ENABLED: u8 = 0x01;
 
+// Filter_Duplicates value (byte 8 of the same response) that means the
+// controller discards repeated advertisements from an address it has already
+// reported.
+const HCI_FILTER_DUPLICATES: u8 = 0x01;
+
 /// Owned raw HCI socket bound to one controller.
 pub(crate) struct HciSocket {
     fd: OwnedFd,
@@ -378,21 +383,43 @@ fn controller_supports_extended_scan(fd: &HciSocket) -> Result<bool, ScanError> 
     }
 }
 
-/// Whether an `LE Read Scan Enable` Command Complete response reports active
-/// scanning. The status byte (6) is known to be success by the caller; byte 7
-/// carries LE_Scan_Enable, byte 8 Filter_Duplicates.
-fn scan_enabled(event: &[u8]) -> bool {
-    event.get(7).copied() == Some(HCI_SCAN_ENABLED)
+/// The controller's LE scan state, as reported by `LE Read Scan Enable`.
+///
+/// This is the only scan configuration the spec lets us read back, which is
+/// why it is worth keeping both fields: the caller needs to know whether a
+/// scan is running to decide ownership, and the duplicate policy to put back
+/// when leaving someone else's scan running.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ScanState {
+    /// Whether the controller is actively scanning.
+    pub(crate) enabled: bool,
+    /// Whether the controller discards duplicate advertisements.
+    pub(crate) filter_duplicates: bool,
 }
 
-/// Whether the controller currently has an LE scan enabled.
+/// Parse an `LE Read Scan Enable` Command Complete response.
+///
+/// The status byte (6) is known to be success by the caller; byte 7 carries
+/// LE_Scan_Enable and byte 8 Filter_Duplicates. A response too short to hold
+/// a field reads as "off" for that field.
+fn scan_state(event: &[u8]) -> ScanState {
+    ScanState {
+        enabled: event.get(7).copied() == Some(HCI_SCAN_ENABLED),
+        filter_duplicates: event.get(8).copied() == Some(HCI_FILTER_DUPLICATES),
+    }
+}
+
+/// Read the controller's current LE scan state.
 ///
 /// The `HCI_LE_Read_Scan_Enable` command (opcode 0x200D) reports the
 /// controller's current scan state regardless of which process started the
-/// scan, which lets the caller tell whether *it* is the scan's owner.
-fn le_scan_enabled(fd: &HciSocket) -> Result<bool, ScanError> {
+/// scan, which is what tells the caller whether *it* is the scan's owner.
+///
+/// A failure here is not fatal: the caller falls back to assuming the
+/// controller was idle, so the scan it starts is treated as its own.
+pub(crate) fn le_scan_state(fd: &HciSocket) -> Result<ScanState, ScanError> {
     let event = fd.command_checked(OGF_LE_CTL, OCF_LE_READ_SCAN_ENABLE, &[])?;
-    Ok(scan_enabled(&event))
+    Ok(scan_state(&event))
 }
 
 /// Which LE scan command family to use: legacy (Bluetooth 4.x) vs extended
@@ -466,27 +493,14 @@ impl ScanMode {
 
     /// Wire bytes for LE Set Scan Enable; the extended variant adds the
     /// duration/period fields (both zero for continuous scanning).
-    fn enable_bytes(self, enable: bool) -> Vec<u8> {
-        // enable, filter_dup (duplicates not filtered)
-        let mut bytes = vec![enable as u8, 0x00];
+    fn enable_bytes(self, enable: bool, filter_duplicates: bool) -> Vec<u8> {
+        // enable, filter_dup
+        let mut bytes = vec![enable as u8, filter_duplicates as u8];
         if matches!(self, Self::Extended) {
             bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // duration, period
         }
         bytes
     }
-}
-
-/// Whether [`configure_le_scan`] started the scan itself or joined one that
-/// was already running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ScanOwnership {
-    /// This process enabled the scan (the controller was idle beforehand) and
-    /// must disable it on shutdown.
-    Owned,
-    /// The controller was already scanning when this process started; the
-    /// scan belongs to whoever started it and is left running on shutdown.
-    /// Note that attaching still replaced the original scan's parameters.
-    Shared,
 }
 
 /// Disable any active scan, set scan parameters, then enable scanning.
@@ -497,34 +511,37 @@ pub(crate) enum ScanOwnership {
 /// controllers reject with "Command Disallowed" (e.g. Broadcom BCM43455); the
 /// disable path tolerates that status (see [`scan_enable_status_ok`]).
 ///
-/// Returns [`ScanOwnership::Owned`] when the controller was idle beforehand,
-/// [`ScanOwnership::Shared`] when a scan was already active.
-fn configure_scan(fd: &HciSocket, mode: ScanMode) -> Result<ScanOwnership, ScanError> {
-    // If the read fails, assume the controller was idle: we own the scan we
-    // are about to start and shutdown still disables it (conservative default).
-    let was_active = match le_scan_enabled(fd) {
-        Ok(active) => active,
-        Err(e) => {
-            eprintln!("failed to query LE scan state: {e}");
-            false
-        }
-    };
+/// Note that attaching to a pre-existing scan replaces its parameters. Only
+/// the duplicate-filtering policy is put back afterwards, by
+/// [`restore_le_scan_duplicates`]; the rest is not readable.
+fn configure_scan(fd: &HciSocket, mode: ScanMode) -> Result<(), ScanError> {
     set_scan_enable(fd, mode, false)?;
     let params = mode.set_params_bytes();
     fd.command_checked(OGF_LE_CTL, mode.set_params_ocf(), &params)?;
-    set_scan_enable(fd, mode, true)?;
-    if was_active {
-        Ok(ScanOwnership::Shared)
-    } else {
-        Ok(ScanOwnership::Owned)
-    }
+    set_scan_enable(fd, mode, true)
+}
+
+/// Enable or disable LE scanning with this process's duplicate policy.
+///
+/// This listener never asks the controller to filter duplicates: RuuviTags
+/// re-broadcast largely unchanged payloads, so controller-side deduplication
+/// would discard measurements we still want to see. Only
+/// [`restore_le_scan_duplicates`] sets a different policy.
+fn set_scan_enable(fd: &HciSocket, mode: ScanMode, enable: bool) -> Result<(), ScanError> {
+    set_scan_enable_with_duplicates(fd, mode, enable, false)
 }
 
 /// Enable or disable LE scanning, tolerating "Command Disallowed" when
 /// disabling an already-disabled scan.
-fn set_scan_enable(fd: &HciSocket, mode: ScanMode, enable: bool) -> Result<(), ScanError> {
+fn set_scan_enable_with_duplicates(
+    fd: &HciSocket,
+    mode: ScanMode,
+    enable: bool,
+    filter_duplicates: bool,
+) -> Result<(), ScanError> {
     let opcode = hci_opcode(OGF_LE_CTL, mode.enable_ocf());
-    let (status, _event) = fd.command(OGF_LE_CTL, mode.enable_ocf(), &mode.enable_bytes(enable))?;
+    let bytes = mode.enable_bytes(enable, filter_duplicates);
+    let (status, _event) = fd.command(OGF_LE_CTL, mode.enable_ocf(), &bytes)?;
     if !scan_enable_status_ok(enable, status) {
         return Err(ScanError::Bluetooth(format!(
             "HCI command {opcode:#06x} failed with status {status:#04x}"
@@ -534,8 +551,8 @@ fn set_scan_enable(fd: &HciSocket, mode: ScanMode, enable: bool) -> Result<(), S
 }
 
 /// Configure LE scanning, preferring extended scanning when the controller
-/// supports it. Returns the resulting [`ScanOwnership`].
-pub(crate) fn configure_le_scan(fd: &HciSocket) -> Result<ScanOwnership, ScanError> {
+/// supports it.
+pub(crate) fn configure_le_scan(fd: &HciSocket) -> Result<(), ScanError> {
     configure_scan(fd, ScanMode::for_controller(fd)?)
 }
 
@@ -545,6 +562,41 @@ pub(crate) fn configure_le_scan(fd: &HciSocket) -> Result<ScanOwnership, ScanErr
 /// (legacy vs extended).
 pub(crate) fn disable_le_scan(fd: &HciSocket) -> Result<(), ScanError> {
     set_scan_enable(fd, ScanMode::for_controller(fd)?, false)
+}
+
+/// Put back the duplicate-filtering policy of a scan this process attached to.
+///
+/// `Filter_Duplicates` is a parameter of LE Set Scan Enable, not of LE Set Scan
+/// Parameters, so restoring it needs no `LE Set Scan Parameters` round trip and
+/// leaves the scan interval, window, own address type and filter policy as
+/// they are. It is also the only piece of the previous configuration that can
+/// be restored: the spec provides no way to read those other parameters back,
+/// so they stay as this process configured them.
+///
+/// The re-read is what keeps this from starting a scan nobody wants: whoever
+/// owned the scan may have stopped it while this process was running, and
+/// setting `Filter_Duplicates` means sending `LE Set Scan Enable`, which
+/// re-enables scanning as a side effect. Returns whether the policy was
+/// restored; `false` means the controller is no longer scanning, so there was
+/// nothing to put back and nothing was sent.
+///
+/// The scan is cycled rather than re-enabled in place. A controller that
+/// rejects a redundant `LE Set Scan Enable` answers `Command Disallowed` (see
+/// [`scan_enable_status_ok`]), which this path cannot tolerate, so the disable
+/// is issued first — it is already tolerated as a no-op — and the re-enable is
+/// the same command [`configure_scan`] issues successfully at startup. The
+/// cost is a scan gap of one command round trip, at process exit.
+pub(crate) fn restore_le_scan_duplicates(
+    fd: &HciSocket,
+    filter_duplicates: bool,
+) -> Result<bool, ScanError> {
+    if !le_scan_state(fd)?.enabled {
+        return Ok(false);
+    }
+    let mode = ScanMode::for_controller(fd)?;
+    set_scan_enable(fd, mode, false)?;
+    set_scan_enable_with_duplicates(fd, mode, true, filter_duplicates)?;
+    Ok(true)
 }
 
 /// Whether a returned status is acceptable for an LE scan enable/disable
@@ -610,15 +662,25 @@ mod tests {
 
         // Legacy LE Set Scan Enable is 2 bytes; the extended variant adds the
         // duration/period fields (both zero for continuous scanning).
-        assert_eq!(ScanMode::Legacy.enable_bytes(true), vec![0x01, 0x00]);
-        assert_eq!(ScanMode::Legacy.enable_bytes(false), vec![0x00, 0x00]);
+        assert_eq!(ScanMode::Legacy.enable_bytes(true, false), vec![0x01, 0x00]);
         assert_eq!(
-            ScanMode::Extended.enable_bytes(true),
+            ScanMode::Legacy.enable_bytes(false, false),
+            vec![0x00, 0x00]
+        );
+        assert_eq!(
+            ScanMode::Extended.enable_bytes(true, false),
             vec![0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
         assert_eq!(
-            ScanMode::Extended.enable_bytes(false),
+            ScanMode::Extended.enable_bytes(false, false),
             vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+
+        // Filter_Duplicates is the second byte, in both command variants.
+        assert_eq!(ScanMode::Legacy.enable_bytes(true, true), vec![0x01, 0x01]);
+        assert_eq!(
+            ScanMode::Extended.enable_bytes(true, true),
+            vec![0x01, 0x01, 0x00, 0x00, 0x00, 0x00]
         );
 
         // Each mode uses its own command OCFs.
@@ -638,18 +700,41 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_enabled_parses_command_complete() {
+    fn test_scan_state_parses_command_complete() {
         // Command Complete for LE Read Scan Enable (opcode 0x200d): status at
         // byte 6, LE_Scan_Enable at byte 7, Filter_Duplicates at byte 8.
-        // LE_Scan_Enable = 0x00 → not scanning.
+        // Not scanning, duplicates not filtered.
         let disabled = [0x04u8, 0x0E, 0x06, 0x01, 0x0D, 0x20, 0x00, 0x00, 0x00];
-        assert!(!scan_enabled(&disabled));
+        assert_eq!(
+            scan_state(&disabled),
+            ScanState {
+                enabled: false,
+                filter_duplicates: false
+            }
+        );
 
-        // LE_Scan_Enable = 0x01 → scanning.
+        // Scanning, duplicates still not filtered.
         let enabled = [0x04u8, 0x0E, 0x06, 0x01, 0x0D, 0x20, 0x00, 0x01, 0x00];
-        assert!(scan_enabled(&enabled));
+        assert_eq!(
+            scan_state(&enabled),
+            ScanState {
+                enabled: true,
+                filter_duplicates: false
+            }
+        );
 
-        // A truncated event reads as "not scanning".
-        assert!(!scan_enabled(&[0x04, 0x0E]));
+        // The pre-existing owner's duplicate policy, which shutdown restores.
+        let filtering = [0x04u8, 0x0E, 0x06, 0x01, 0x0D, 0x20, 0x00, 0x01, 0x01];
+        assert_eq!(
+            scan_state(&filtering),
+            ScanState {
+                enabled: true,
+                filter_duplicates: true
+            }
+        );
+
+        // A truncated event reads as an idle controller with no filtering,
+        // which is the same fallback the caller uses on a failed query.
+        assert_eq!(scan_state(&[0x04, 0x0E]), ScanState::default());
     }
 }

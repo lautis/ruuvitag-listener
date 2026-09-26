@@ -7,7 +7,8 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use ruuvitag_listener::app::{Options, Scanner, run_with_io};
 use ruuvitag_listener::{
-    Backend, MacAddress, MeasurementResult, ScanError, ScanSession, decode_ruuvi_data,
+    Backend, MacAddress, MeasurementResult, ScanConfig, ScanError, ScanExitBehavior, ScanSession,
+    decode_ruuvi_data,
 };
 use std::future::Future;
 use std::hint::black_box;
@@ -65,9 +66,7 @@ impl FakeScanner {
 impl Scanner for FakeScanner {
     fn start_scan(
         &self,
-        _backend: Backend,
-        _verbose: bool,
-        _adapter: Option<String>,
+        _config: ScanConfig,
     ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>> {
         let results = self.results.clone();
         Box::pin(async move {
@@ -90,8 +89,9 @@ fn default_options() -> Options {
         only_aliased: false,
         verbose: false,
         throttle: None,
-        backend: Backend::Bluer,
+        backend: Backend::default(),
         adapter: None,
+        hci_scan_exit_behavior: ScanExitBehavior::default(),
     }
 }
 

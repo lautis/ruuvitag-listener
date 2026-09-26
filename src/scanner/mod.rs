@@ -189,6 +189,92 @@ impl Default for Backend {
     }
 }
 
+/// What the HCI backend does with the adapter's LE scan on shutdown.
+///
+/// The controller's scan state is global: a scan left running keeps the radio
+/// awake for everyone, and disabling it stops whatever process started it. A
+/// scan this process leaves running also gets its duplicate-filtering policy
+/// put back, so its owner does not silently inherit ours.
+/// The BlueZ backend is unaffected — it ends its discovery session either way.
+#[derive(clap::ValueEnum, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ScanExitBehavior {
+    /// Stop the scan on exit only if this process started it (default). A scan
+    /// that was already running is left to its original owner, with the
+    /// duplicate-filtering policy it had.
+    #[default]
+    OwnedOnly,
+    /// Always stop the scan on exit, even if another process started it. The
+    /// pre-0.9 behavior; use when this process owns the adapter.
+    Always,
+    /// Never stop the scan on exit, not even one this process started. The
+    /// adapter keeps scanning after the listener exits, with the duplicate
+    /// policy of whichever scan is running.
+    Never,
+}
+
+impl ScanExitBehavior {
+    /// Resolve to a definite [`ScanShutdown`] once the controller's prior scan
+    /// state is known.
+    ///
+    /// `Always` is the only behavior that ignores `was_active`: it stops the
+    /// scan either way. The other two need it, because a pre-existing scan
+    /// has a duplicate policy worth putting back and a scan this process
+    /// started does not. Resolving once, up front, keeps `OwnedOnly` from
+    /// having to be interpreted anywhere else.
+    pub fn resolve(self, was_active: bool) -> ScanShutdown {
+        match self {
+            Self::Always => ScanShutdown::Stop,
+            Self::Never if was_active => ScanShutdown::RestoreAndLeaveRunning,
+            Self::Never => ScanShutdown::LeaveRunning,
+            Self::OwnedOnly if was_active => ScanShutdown::RestoreAndLeaveRunning,
+            Self::OwnedOnly => ScanShutdown::Stop,
+        }
+    }
+
+    /// Whether resolving this behavior needs the controller's current scan
+    /// state. `Always` does not, so it can skip the HCI round-trip entirely.
+    ///
+    /// `OwnedOnly` needs the state to tell a scan it started from one another
+    /// process owns, and `Never` needs it for the same reason: both can end up
+    /// leaving a foreign scan running, whose duplicate policy has to be put
+    /// back. `Never` reads the state even when it ends up owning the scan,
+    /// which it cannot know in advance.
+    ///
+    /// Read the state only when this returns true, then pass it to
+    /// [`Self::resolve`].
+    pub fn needs_scan_state(self) -> bool {
+        !matches!(self, Self::Always)
+    }
+}
+
+/// What shutdown does with the adapter's LE scan, once the configured
+/// [`ScanExitBehavior`] has been resolved against the controller's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanShutdown {
+    /// Send `LE Set Scan Enable (disable)` so the adapter stops scanning.
+    Stop,
+    /// Leave the adapter scanning with the duplicate policy this process
+    /// configured, because this process is the one that started the scan.
+    LeaveRunning,
+    /// Leave the adapter scanning, but re-apply the duplicate policy that was
+    /// configured before this process attached to the scan. Only the duplicate
+    /// policy can be put back; the rest of the previous configuration is not
+    /// readable and stays as this process set it.
+    ///
+    /// If the scan is no longer running by then — its owner may have stopped it
+    /// while this process ran — nothing is sent, since setting the policy would
+    /// re-enable scanning as a side effect.
+    RestoreAndLeaveRunning,
+}
+
+/// Everything a backend needs to start a scan, as
+/// `(backend, verbose, adapter, scan_exit)`.
+///
+/// One grouped argument instead of a positional per option, so adding an
+/// option does not widen the signature of [`crate::app::Scanner::start_scan`]
+/// and every backend entry point.
+pub type ScanConfig = (Backend, bool, Option<String>, ScanExitBehavior);
+
 impl std::fmt::Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -309,27 +395,29 @@ pub fn decode_ruuvi_data(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
 /// Start scanning for RuuviTag devices using the specified backend.
 ///
 /// This is the main entry point for creating a scanner. It dispatches to the
-/// appropriate backend implementation based on the `backend` parameter.
+/// appropriate backend implementation based on the backend in `config`.
 ///
 /// # Arguments
-/// * `backend` - The scanner backend to use
-/// * `verbose` - If true, decode errors are sent as Err values; otherwise they're silently dropped.
-/// * `adapter` - Bluetooth adapter name (e.g. "hci0"), or `None` for the backend default.
+/// * `config` - Scan parameters: backend, verbose flag, adapter name (or
+///   `None` for the backend default) and HCI scan-exit behavior.
 ///
 /// # Returns
 /// A scan session whose `measurements` receiver yields measurements (or decode
 /// errors if verbose). The session can be stopped with
-/// [`ScanSession::stop`], which lets the backend disable the adapter's scan.
-pub async fn start_scan(
-    backend: Backend,
-    verbose: bool,
-    adapter: Option<String>,
-) -> Result<ScanSession, ScanError> {
+/// [`ScanSession::stop`], which lets the backend disable the adapter's scan
+/// according to the configured [`ScanExitBehavior`].
+pub async fn start_scan(config: ScanConfig) -> Result<ScanSession, ScanError> {
+    let (backend, verbose, adapter, scan_exit) = config;
     match backend {
         #[cfg(feature = "bluer")]
-        Backend::Bluer => bluer::start_scan(verbose, adapter).await,
+        Backend::Bluer => {
+            // The BlueZ backend ends its discovery session on shutdown, so
+            // the scan-exit behavior does not apply to it.
+            let _ = scan_exit;
+            bluer::start_scan(verbose, adapter).await
+        }
         #[cfg(feature = "hci")]
-        Backend::Hci => hci::start_scan(verbose, adapter).await,
+        Backend::Hci => hci::start_scan(verbose, adapter, scan_exit).await,
     }
 }
 
@@ -522,17 +610,108 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_from_str() {
+    fn test_scan_exit_behavior_value_names() {
+        use clap::ValueEnum;
+        let names: Vec<String> = ScanExitBehavior::value_variants()
+            .iter()
+            .map(|v| {
+                v.to_possible_value()
+                    .expect("every variant has a name")
+                    .get_name()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(names, vec!["owned-only", "always", "never"]);
+        assert_eq!(
+            ScanExitBehavior::default(),
+            ScanExitBehavior::OwnedOnly,
+            "owned-only is the documented default"
+        );
+        assert_eq!(
+            <ScanExitBehavior as ValueEnum>::from_str("always", false).unwrap(),
+            ScanExitBehavior::Always
+        );
+        assert!(<ScanExitBehavior as ValueEnum>::from_str("maybe", false).is_err());
+    }
+
+    #[test]
+    fn test_resolve_owned_only_follows_prior_scan_state() {
+        // Idle beforehand: the scan is ours, so we stop it.
+        assert_eq!(
+            ScanExitBehavior::OwnedOnly.resolve(false),
+            ScanShutdown::Stop
+        );
+        // Someone else was already scanning: leave their scan running, with
+        // the duplicate policy they had.
+        assert_eq!(
+            ScanExitBehavior::OwnedOnly.resolve(true),
+            ScanShutdown::RestoreAndLeaveRunning
+        );
+    }
+
+    #[test]
+    fn test_resolve_always_ignores_prior_scan_state() {
+        for was_active in [false, true] {
+            assert_eq!(
+                ScanExitBehavior::Always.resolve(was_active),
+                ScanShutdown::Stop
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_leaving_a_foreign_scan_running_restores_it() {
+        // `never` still differs by prior state: a pre-existing scan gets its
+        // duplicate policy back, one we started keeps the policy we set.
+        assert_eq!(
+            ScanExitBehavior::Never.resolve(true),
+            ScanShutdown::RestoreAndLeaveRunning
+        );
+        assert_eq!(
+            ScanExitBehavior::Never.resolve(false),
+            ScanShutdown::LeaveRunning
+        );
+    }
+
+    #[test]
+    fn test_only_always_skips_reading_scan_state() {
+        assert!(ScanExitBehavior::OwnedOnly.needs_scan_state());
+        assert!(ScanExitBehavior::Never.needs_scan_state());
+        // `always` must not pay for the HCI round-trip.
+        assert!(!ScanExitBehavior::Always.needs_scan_state());
+    }
+
+    // Backend variants are feature-gated, so each assertion pair is gated with
+    // the variant it names; otherwise these tests fail to compile in
+    // single-backend builds.
+    #[test]
+    #[cfg(feature = "bluer")]
+    fn test_backend_from_str_bluer() {
         assert_eq!(Backend::from_str("bluer").unwrap(), Backend::Bluer);
         assert_eq!(Backend::from_str("bluez").unwrap(), Backend::Bluer);
+    }
+
+    #[test]
+    #[cfg(feature = "hci")]
+    fn test_backend_from_str_hci() {
         assert_eq!(Backend::from_str("hci").unwrap(), Backend::Hci);
         assert_eq!(Backend::from_str("raw").unwrap(), Backend::Hci);
+    }
+
+    #[test]
+    fn test_backend_from_str_rejects_unknown() {
         assert!(Backend::from_str("invalid").is_err());
     }
 
     #[test]
-    fn test_backend_display() {
+    #[cfg(feature = "bluer")]
+    fn test_backend_display_bluer() {
         assert_eq!(format!("{}", Backend::Bluer), "bluer");
+    }
+
+    #[test]
+    #[cfg(feature = "hci")]
+    fn test_backend_display_hci() {
         assert_eq!(format!("{}", Backend::Hci), "hci");
     }
 }
