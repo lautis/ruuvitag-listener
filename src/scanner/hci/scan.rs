@@ -130,9 +130,9 @@ impl ScanExitBehavior {
     /// `prior` is the controller's state; a failed `LE Read Scan Enable` reads
     /// as idle, which counts as ours. `Always` ignores it and stops either way.
     fn shutdown_for(self, prior: ScanState) -> ScanShutdown {
-        // A scan this process started carries the policy we set, so only a
-        // pre-existing one has anything to put back.
-        let filter_duplicates = prior.enabled.then_some(prior.filter_duplicates);
+        // Only "someone else was filtering duplicates" leaves a policy to put
+        // back; every other case already runs the way we want to leave it.
+        let filter_duplicates = (prior.enabled && prior.filter_duplicates).then_some(true);
 
         match (self, prior.enabled) {
             // `always` stops the scan whoever started it; `owned-only` stops it
@@ -303,19 +303,14 @@ mod tests {
                 [
                     ScanShutdown::Stop,
                     ScanShutdown::Stop,
-                    leave(Some(false)),
+                    leave(None),
                     leave(Some(true)),
                 ],
             ),
             (ScanExitBehavior::Always, [ScanShutdown::Stop; 4]),
             (
                 ScanExitBehavior::Never,
-                [
-                    leave(None),
-                    leave(None),
-                    leave(Some(false)),
-                    leave(Some(true)),
-                ],
+                [leave(None), leave(None), leave(None), leave(Some(true))],
             ),
         ];
         for (behavior, expected) in cases {
@@ -327,6 +322,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A foreign scan that already matched ours has no policy to put back, and
+    /// restoring one would cycle a scan for no change.
+    #[test]
+    fn test_foreign_scan_without_dedup_needs_no_restore() {
+        assert_eq!(
+            ScanExitBehavior::Never.shutdown_for(prior(true, false)),
+            leave(None)
+        );
+        assert_eq!(
+            ScanExitBehavior::OwnedOnly.shutdown_for(prior(true, false)),
+            leave(None)
+        );
     }
 
     #[test]
