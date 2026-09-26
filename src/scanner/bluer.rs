@@ -5,7 +5,7 @@
 
 use super::{
     DecodeError, MEASUREMENT_CHANNEL_BUFFER_SIZE, MeasurementResult, RUUVI_MANUFACTURER_ID,
-    ScanError, ScanSession, decode_ruuvi_data,
+    ScanConfig, ScanError, ScanSession, decode_ruuvi_data,
 };
 use crate::mac_address::MacAddress;
 use bluer::{Adapter, AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport, Session};
@@ -26,18 +26,19 @@ impl From<bluer::Error> for ScanError {
 /// returned channel. Runs indefinitely until interrupted.
 ///
 /// # Arguments
-/// * `verbose` - If true, decode errors are sent as Err values; otherwise they're silently dropped.
-/// * `adapter_name` - Kernel adapter name (e.g. "hci0"), or `None` for BlueZ's default adapter.
+/// * `config` - Scan parameters: verbose flag and adapter name (or `None` for
+///   BlueZ's default adapter). The HCI scan-exit behavior does not apply.
 ///
 /// # Returns
 /// A scan session whose `measurements` receiver yields measurements (or decode
 /// errors if verbose). Stopping the session (`ScanSession::stop`) ends the
 /// discovery stream, which makes bluer drop its discovery session token and
 /// tell BlueZ to stop discovery on the adapter.
-pub async fn start_scan(
-    verbose: bool,
-    adapter_name: Option<String>,
-) -> Result<ScanSession, ScanError> {
+pub async fn start_scan(config: ScanConfig) -> Result<ScanSession, ScanError> {
+    let ScanConfig {
+        verbose, adapter, ..
+    } = config;
+    let adapter_name = adapter;
     let session = Session::new().await?;
     let adapter = match adapter_name {
         Some(name) => {

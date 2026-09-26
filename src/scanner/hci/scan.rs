@@ -2,14 +2,12 @@
 //! event read loop.
 
 use super::bpf::set_bpf_ruuvi_filter;
-use super::ffi::{
-    HciSocket, ScanState, configure_le_scan, disable_le_scan, le_scan_state, read_packet,
-    restore_le_scan_duplicates,
-};
+use super::ffi::{HciController, HciSocket, ScanState, read_packet};
 use super::parse::parse_event;
 use super::*;
 use crate::scanner::{
-    MEASUREMENT_CHANNEL_BUFFER_SIZE, MeasurementResult, ScanError, ScanExitBehavior, ScanSession,
+    MEASUREMENT_CHANNEL_BUFFER_SIZE, MeasurementResult, ScanConfig, ScanError, ScanExitBehavior,
+    ScanSession,
 };
 use std::io;
 use std::path::Path;
@@ -69,24 +67,29 @@ fn resolve_adapter(name: &str) -> Result<u16, ScanError> {
     Ok(dev_id)
 }
 
+/// What `drain_events` did with the readable socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainOutcome {
+    /// Drained the buffered packets; keep waiting for more.
+    Continue,
+    /// Stop receiving for good: a real read error, or the consumer is gone.
+    Done,
+}
+
 /// Forward every HCI event currently readable on `guard` to `tx`.
-///
-/// Returns `false` when the receive loop should end for good: a real read
-/// error, or a consumer that has gone away. Running out of buffered packets is
-/// not that — it just means the socket has nothing more for now.
 async fn drain_events(
     guard: &mut AsyncFdReadyGuard<'_, HciSocket>,
     buf: &mut [u8; HCI_EVENT_BUF_SIZE],
     tx: &mpsc::Sender<MeasurementResult>,
     verbose: bool,
-) -> bool {
+) -> DrainOutcome {
     loop {
         let n = match guard.try_io(|inner| read_packet(inner, buf)) {
-            Ok(Ok(0)) | Err(_) => return true, // EOF or no more buffered data
+            Ok(Ok(0)) | Err(_) => return DrainOutcome::Continue, // EOF or no more buffered data
             Ok(Ok(n)) => n,
             Ok(Err(e)) => {
                 eprintln!("failed to read HCI event: {e}");
-                return false;
+                return DrainOutcome::Done;
             }
         };
 
@@ -97,7 +100,7 @@ async fn drain_events(
             && (result.is_ok() || verbose)
             && tx.send(result).await.is_err()
         {
-            return false; // consumer gone, stop scanning
+            return DrainOutcome::Done; // consumer gone, stop scanning
         }
     }
 }
@@ -160,26 +163,27 @@ impl ScanExitBehavior {
 /// not for the many other BLE devices that may be in the environment.
 ///
 /// # Arguments
-/// * `verbose` - If true, decode errors are sent as Err values; otherwise they're silently dropped.
-/// * `adapter` - Kernel adapter name (e.g. "hci1"), or `None` for `hci0`.
-/// * `scan_exit` - What to do with the adapter's LE scan on shutdown.
+/// * `config` - Scan parameters: verbose flag, adapter name (or `None` for
+///   `hci0`) and HCI scan-exit behavior.
 ///
 /// # Returns
 /// A scan session whose `measurements` receiver yields measurements (or decode
 /// errors if verbose). Stopping the session (`ScanSession::stop`) disables the
-/// adapter's scan when [`ScanExitBehavior::OwnedOnly`] and this process started
-/// it, or unconditionally when the behavior is
-/// [`ScanExitBehavior::Always`]; a scan left to its original owner keeps
-/// running.
+/// adapter's scan when [`ScanExitBehavior::OwnedOnly`](crate::scanner::ScanExitBehavior)
+/// and this process started it, or unconditionally when the behavior is
+/// [`ScanExitBehavior::Always`](crate::scanner::ScanExitBehavior); a scan left
+/// to its original owner keeps running.
 ///
 /// # Requirements
 /// - CAP_NET_RAW and CAP_NET_ADMIN capabilities or root privileges
 /// - An available HCI device (typically hci0)
-pub async fn start_scan(
-    verbose: bool,
-    adapter: Option<String>,
-    scan_exit: ScanExitBehavior,
-) -> Result<ScanSession, ScanError> {
+pub async fn start_scan(config: ScanConfig) -> Result<ScanSession, ScanError> {
+    let ScanConfig {
+        verbose,
+        adapter,
+        scan_exit,
+        ..
+    } = config;
     let dev_id = match adapter {
         Some(name) => resolve_adapter(&name)?,
         None => 0, // default to hci0, as before
@@ -190,22 +194,20 @@ pub async fn start_scan(
     event_socket.set_event_filter()?;
     set_bpf_ruuvi_filter(&event_socket)?; // Kernel-level filtering for Ruuvi packets
 
-    // We need a separate socket for sending commands (bound to specific device).
-    // It needs a filter that lets Command Complete events through so we can read
-    // back command results and detect Bluetooth 5 extended-advertising support.
-    let cmd_socket = HciSocket::open(dev_id)?;
-    cmd_socket.set_command_filter()?;
+    // Command socket speaks the controller's scan command family for both
+    // setup and shutdown, without re-querying features.
+    let cmd = HciController::open(dev_id)?;
 
     // Settle what shutdown will do before the scan is configured, since
     // configuring it replaces any scan already running. If the query fails we
     // assume the controller was idle, so the scan we are about to start counts
     // as ours.
-    let prior = le_scan_state(&cmd_socket).unwrap_or_else(|e| {
+    let prior = cmd.scan_state().unwrap_or_else(|e| {
         eprintln!("failed to query LE scan state: {e}");
         ScanState::default()
     });
     let shutdown = scan_exit.shutdown_for(prior);
-    let mode = configure_le_scan(&cmd_socket)?;
+    cmd.configure()?;
 
     let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
     let cancel = CancellationToken::new();
@@ -233,7 +235,9 @@ pub async fn start_scan(
                     };
 
                     // Drain all available packets before waiting again.
-                    if !drain_events(&mut guard, &mut buf, &tx, verbose).await {
+                    if drain_events(&mut guard, &mut buf, &tx, verbose).await
+                        == DrainOutcome::Done
+                    {
                         break 'receive;
                     }
                 }
@@ -244,7 +248,7 @@ pub async fn start_scan(
         // reported, not propagated: the scan is already over and there is
         // nothing left to abort.
         let finished = match shutdown {
-            ScanShutdown::Stop => disable_le_scan(&cmd_socket, mode),
+            ScanShutdown::Stop => cmd.disable(),
             // The controller already runs the policy we want to leave: a scan
             // this process started, or a foreign scan that matched ours.
             ScanShutdown::LeaveRunning {
@@ -254,7 +258,7 @@ pub async fn start_scan(
             // leaving it running, so its owner does not silently inherit ours.
             ScanShutdown::LeaveRunning {
                 filter_duplicates: Some(policy),
-            } => restore_le_scan_duplicates(&cmd_socket, mode, policy),
+            } => cmd.restore_duplicates(policy),
         };
         if let Err(e) = finished {
             eprintln!("failed to finish the LE scan on hci{dev_id}: {e}");

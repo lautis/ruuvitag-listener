@@ -97,6 +97,18 @@ impl Default for Options {
     }
 }
 
+impl From<&Options> for ScanConfig {
+    /// The scanner half of `Options`; the output half stays in `app`.
+    fn from(options: &Options) -> Self {
+        Self {
+            backend: options.backend,
+            verbose: options.verbose,
+            adapter: options.adapter.clone(),
+            scan_exit: options.hci_scan_exit_behavior,
+        }
+    }
+}
+
 /// Errors returned by the core run loop.
 #[derive(Error, Debug)]
 pub enum RunError {
@@ -158,6 +170,17 @@ fn write_measurement(
     writeln!(out, "{line}")
 }
 
+/// Emission filter combining V6/E1 dedup, throttle and alias filtering.
+///
+/// Keeps the run loop flat: one call decides emit vs drop and resolves the
+/// display name.
+struct EmissionFilter {
+    e1_devices: HashSet<MacAddress>,
+    throttle: Option<Throttle>,
+    aliases: AliasMap,
+    only_aliased: bool,
+}
+
 /// Run the core processing loop, writing formatted output to `out` and verbose errors to `err`.
 ///
 /// - On successful measurements, it optionally applies throttling, formats them, and writes a line to `out`.
@@ -165,6 +188,35 @@ fn write_measurement(
 /// - When `stop` resolves (e.g. SIGINT/SIGTERM in the binary), the loop ends
 ///   and the scan is stopped gracefully so the backend can disable the
 ///   adapter's LE scan before the process exits.
+impl EmissionFilter {
+    fn new(options: &Options) -> Self {
+        Self {
+            e1_devices: HashSet::new(),
+            throttle: options.throttle.map(Throttle::new),
+            aliases: crate::alias::to_map(&options.aliases),
+            only_aliased: options.only_aliased,
+        }
+    }
+
+    /// The display name to emit, or `None` to drop the measurement.
+    fn should_emit(&mut self, measurement: &Measurement) -> Option<String> {
+        if is_redundant_v6(&mut self.e1_devices, measurement) {
+            return None;
+        }
+        let allowed = self
+            .throttle
+            .as_mut()
+            .is_none_or(|t| t.should_emit(measurement.mac));
+        if !allowed {
+            return None;
+        }
+        if self.only_aliased && !crate::alias::has_alias(&measurement.mac, &self.aliases) {
+            return None;
+        }
+        Some(crate::alias::resolve_name(&measurement.mac, &self.aliases))
+    }
+}
+
 pub async fn run_with_io(
     options: Options,
     scanner: &dyn Scanner,
@@ -172,9 +224,10 @@ pub async fn run_with_io(
     err: &mut dyn Write,
     stop: impl Future<Output = ()> + Send,
 ) -> Result<(), RunError> {
-    let aliases: AliasMap = crate::alias::to_map(&options.aliases);
     let formatter: Box<dyn OutputFormatter> = match options.format {
-        OutputFormat::InfluxDb => Box::new(InfluxDbFormatter::new(options.influxdb_measurement)),
+        OutputFormat::InfluxDb => {
+            Box::new(InfluxDbFormatter::new(options.influxdb_measurement.clone()))
+        }
         OutputFormat::Jsonl => Box::new(JsonLinesFormatter::new()),
         OutputFormat::Csv => Box::new(CsvFormatter::new()),
     };
@@ -182,20 +235,10 @@ pub async fn run_with_io(
         writeln!(out, "{header}")?;
     }
 
-    // Create throttle if interval is specified
-    let mut throttle = options.throttle.map(Throttle::new);
+    let mut filter = EmissionFilter::new(&options);
+    let scan_config = ScanConfig::from(&options);
 
-    // Devices seen emitting E1, whose redundant V6 frames we drop.
-    let mut e1_devices: HashSet<MacAddress> = HashSet::new();
-
-    let mut session = scanner
-        .start_scan(ScanConfig {
-            backend: options.backend,
-            verbose: options.verbose,
-            adapter: options.adapter,
-            scan_exit: options.hci_scan_exit_behavior,
-        })
-        .await?;
+    let mut session = scanner.start_scan(scan_config).await?;
 
     tokio::pin!(stop);
 
@@ -204,21 +247,7 @@ pub async fn run_with_io(
             result = session.measurements.recv() => match result {
                 Some(result) => match result {
                     Ok(measurement) => {
-                        if is_redundant_v6(&mut e1_devices, &measurement) {
-                            continue;
-                        }
-
-                        let should_emit = throttle
-                            .as_mut()
-                            .is_none_or(|t: &mut Throttle| t.should_emit(measurement.mac));
-
-                        if should_emit {
-                            let only_aliased = options.only_aliased
-                                && !crate::alias::has_alias(&measurement.mac, &aliases);
-                            if only_aliased {
-                                continue;
-                            }
-                            let name = crate::alias::resolve_name(&measurement.mac, &aliases);
+                        if let Some(name) = filter.should_emit(&measurement) {
                             write_measurement(&*formatter, &measurement, &name, out)?;
                         }
                     }

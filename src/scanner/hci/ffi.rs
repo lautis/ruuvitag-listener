@@ -547,13 +547,45 @@ fn set_scan_enable_with_duplicates(
     Ok(())
 }
 
-/// Configure LE scanning, preferring extended scanning when the controller
-/// supports it, and report the mode used so shutdown can speak the same
-/// command family without re-querying the controller's features.
-pub(crate) fn configure_le_scan(fd: &HciSocket) -> Result<ScanMode, ScanError> {
-    let mode = ScanMode::for_controller(fd)?;
-    configure_scan(fd, mode)?;
-    Ok(mode)
+/// Command socket plus the scan command family it speaks.
+///
+/// Every scan command needs both: the socket to send it on and the mode
+/// (legacy vs extended) that picks the opcode. Bundling them keeps callers
+/// from threading `(fd, mode)` pairs through `scan.rs`.
+pub(crate) struct HciController {
+    socket: HciSocket,
+    mode: ScanMode,
+}
+
+impl HciController {
+    /// Open a command socket for `dev_id` and settle which command family it
+    /// speaks, so startup and shutdown agree without re-querying features.
+    pub(crate) fn open(dev_id: u16) -> Result<Self, ScanError> {
+        let socket = HciSocket::open(dev_id)?;
+        socket.set_command_filter()?;
+        let mode = ScanMode::for_controller(&socket)?;
+        Ok(Self { socket, mode })
+    }
+
+    /// Read the controller's current LE scan state.
+    pub(crate) fn scan_state(&self) -> Result<ScanState, ScanError> {
+        le_scan_state(&self.socket)
+    }
+
+    /// Disable any active scan, set our parameters, then enable scanning.
+    pub(crate) fn configure(&self) -> Result<(), ScanError> {
+        configure_scan(&self.socket, self.mode)
+    }
+
+    /// Disable LE scanning, speaking the mode used to start it.
+    pub(crate) fn disable(&self) -> Result<(), ScanError> {
+        disable_le_scan(&self.socket, self.mode)
+    }
+
+    /// Put back the duplicate policy of a scan we attached to.
+    pub(crate) fn restore_duplicates(&self, filter_duplicates: bool) -> Result<(), ScanError> {
+        restore_le_scan_duplicates(&self.socket, self.mode, filter_duplicates)
+    }
 }
 
 /// Disable LE scanning on the controller, matching the mode used to start it.

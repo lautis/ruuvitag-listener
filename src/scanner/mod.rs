@@ -362,22 +362,11 @@ pub fn decode_ruuvi_data(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
 /// [`ScanSession::stop`], which lets the backend disable the adapter's scan
 /// according to the configured [`ScanExitBehavior`].
 pub async fn start_scan(config: ScanConfig) -> Result<ScanSession, ScanError> {
-    let ScanConfig {
-        backend,
-        verbose,
-        adapter,
-        scan_exit,
-    } = config;
-    match backend {
+    match config.backend {
         #[cfg(feature = "bluer")]
-        Backend::Bluer => {
-            // The BlueZ backend ends its discovery session on shutdown, so
-            // the scan-exit behavior does not apply to it.
-            let _ = scan_exit;
-            bluer::start_scan(verbose, adapter).await
-        }
+        Backend::Bluer => bluer::start_scan(config).await,
         #[cfg(feature = "hci")]
-        Backend::Hci => hci::start_scan(verbose, adapter, scan_exit).await,
+        Backend::Hci => hci::start_scan(config).await,
     }
 }
 
