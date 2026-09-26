@@ -1,6 +1,6 @@
 //! JSON Lines output formatter.
 
-use crate::measurement::Measurement;
+use crate::measurement::{Measurement, fields};
 use crate::output::{OutputFormatter, format_timestamp_rfc3339};
 use std::fmt::Write;
 
@@ -59,43 +59,20 @@ impl JsonLinesFormatter {
 
     /// Write measurement fields, omitting absent values.
     ///
-    /// Field names and units match the InfluxDB line protocol output.
+    /// Field names, units and order come from the measurement field schema.
     #[inline]
     fn write_fields(buf: &mut String, m: &Measurement) {
         // MAC, name, format, and timestamp always precede the fields, so every
         // present field is written with a leading comma.
-        macro_rules! write_field {
-            ($key:literal, $val:expr) => {
-                if let Some(v) = $val {
-                    buf.push(',');
-                    let _ = write!(buf, "{}:{}", $key, v);
-                }
-            };
+        for spec in fields::FIELDS {
+            if let Some(v) = (spec.get)(m) {
+                buf.push(',');
+                buf.push('"');
+                buf.push_str(spec.name);
+                buf.push_str("\":");
+                let _ = write!(buf, "{v}");
+            }
         }
-
-        write_field!("\"temperature\"", m.temperature);
-        write_field!("\"humidity\"", m.humidity);
-        write_field!("\"pressure\"", m.pressure.map(|p| p / 1000.0));
-        write_field!("\"battery_potential\"", m.battery);
-        write_field!("\"tx_power\"", m.tx_power);
-        write_field!("\"rssi\"", m.rssi);
-        write_field!("\"movement_counter\"", m.movement_counter);
-        write_field!("\"measurement_sequence_number\"", m.measurement_sequence);
-        if let Some((x, y, z)) = m.acceleration {
-            let _ = write!(
-                buf,
-                ",\"acceleration_x\":{},\"acceleration_y\":{},\"acceleration_z\":{}",
-                x, y, z
-            );
-        }
-        write_field!("\"pm1_0\"", m.pm1_0);
-        write_field!("\"pm2_5\"", m.pm2_5);
-        write_field!("\"pm4_0\"", m.pm4_0);
-        write_field!("\"pm10_0\"", m.pm10_0);
-        write_field!("\"co2\"", m.co2);
-        write_field!("\"voc_index\"", m.voc_index);
-        write_field!("\"nox_index\"", m.nox_index);
-        write_field!("\"luminosity\"", m.luminosity);
     }
 }
 
