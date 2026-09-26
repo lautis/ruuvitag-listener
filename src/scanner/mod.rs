@@ -36,6 +36,11 @@ use tokio_util::sync::CancellationToken;
 pub struct ScanSession {
     /// Receiver for measurements (or decode errors when verbose).
     pub measurements: mpsc::Receiver<MeasurementResult>,
+    /// Non-fatal backend warnings (e.g. a failed LE scan disable), written to
+    /// the process's error stream by the run loop. Control-plane messages are
+    /// rare, so the channel is unbounded: they can neither block the scan nor
+    /// be dropped. Closes when the backend task finishes.
+    pub warnings: mpsc::UnboundedReceiver<String>,
     /// Cancellation signal used to ask the backend task to stop scanning
     /// gracefully. `cancel()` is idempotent, so calling [`Self::stop`] more
     /// than once is harmless.
@@ -49,13 +54,16 @@ impl ScanSession {
     ///
     /// `cancel` requests the task to stop scanning; the task is expected to
     /// disable the adapter's scan (and do any other cleanup) before finishing.
+    /// Backend tasks report non-fatal problems through `warnings`.
     pub fn managed(
         measurements: mpsc::Receiver<MeasurementResult>,
+        warnings: mpsc::UnboundedReceiver<String>,
         cancel: CancellationToken,
         task: JoinHandle<()>,
     ) -> Self {
         Self {
             measurements,
+            warnings,
             cancel,
             task: Some(task),
         }
@@ -63,8 +71,10 @@ impl ScanSession {
 
     /// Wrap a bare receiver with no managed scan (used in tests).
     pub fn unmanaged(measurements: mpsc::Receiver<MeasurementResult>) -> Self {
+        let (_, warnings) = mpsc::unbounded_channel();
         Self {
             measurements,
+            warnings,
             cancel: CancellationToken::new(),
             task: None,
         }

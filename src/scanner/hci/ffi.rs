@@ -577,7 +577,8 @@ pub(crate) fn disable_le_scan(fd: &HciSocket, mode: ScanMode) -> Result<(), Scan
 /// owned the scan may have stopped it while this process was running, and
 /// setting `Filter_Duplicates` means sending `LE Set Scan Enable`, which
 /// re-enables scanning as a side effect. When that has happened there is
-/// nothing to put back, so nothing is sent and the reason is logged.
+/// nothing to put back, so nothing is sent and the reason is returned as a
+/// warning for the caller to report.
 ///
 /// The scan is cycled rather than re-enabled in place. A controller that
 /// rejects a redundant `LE Set Scan Enable` answers `Command Disallowed` (see
@@ -585,17 +586,22 @@ pub(crate) fn disable_le_scan(fd: &HciSocket, mode: ScanMode) -> Result<(), Scan
 /// is issued first — it is already tolerated as a no-op — and the re-enable is
 /// the same command [`configure_scan`] issues successfully at startup. The
 /// cost is a scan gap of one command round trip, at process exit.
+///
+/// Returns the non-fatal warning to report, if there is one. Callers own
+/// warning delivery, so this stays free of any channel or runtime type.
 pub(crate) fn restore_le_scan_duplicates(
     fd: &HciSocket,
     mode: ScanMode,
     filter_duplicates: bool,
-) -> Result<(), ScanError> {
+) -> Result<Option<String>, ScanError> {
     if !le_scan_state(fd)?.enabled {
-        eprintln!("LE scan stopped while we ran; not restoring its duplicate policy");
-        return Ok(());
+        return Ok(Some(
+            "LE scan stopped while we ran; not restoring its duplicate policy".to_string(),
+        ));
     }
     set_scan_enable_with_duplicates(fd, mode, false, false)?;
-    set_scan_enable_with_duplicates(fd, mode, true, filter_duplicates)
+    set_scan_enable_with_duplicates(fd, mode, true, filter_duplicates)?;
+    Ok(None)
 }
 
 /// Whether a returned status is acceptable for an LE scan enable/disable

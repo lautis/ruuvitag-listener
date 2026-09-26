@@ -78,6 +78,7 @@ async fn drain_events(
     guard: &mut AsyncFdReadyGuard<'_, HciSocket>,
     buf: &mut [u8; HCI_EVENT_BUF_SIZE],
     tx: &mpsc::Sender<MeasurementResult>,
+    warn_tx: &mpsc::UnboundedSender<String>,
     verbose: bool,
 ) -> bool {
     loop {
@@ -85,7 +86,7 @@ async fn drain_events(
             Ok(Ok(0)) | Err(_) => return true, // EOF or no more buffered data
             Ok(Ok(n)) => n,
             Ok(Err(e)) => {
-                eprintln!("failed to read HCI event: {e}");
+                let _ = warn_tx.send(format!("failed to read HCI event: {e}"));
                 return false;
             }
         };
@@ -120,6 +121,23 @@ enum ScanShutdown {
         /// controller's current setting alone.
         filter_duplicates: Option<bool>,
     },
+}
+
+/// Fold a non-fatal warning into the fatal error that pre-empted it.
+///
+/// Setup warnings are delivered over the session's warnings channel, but a
+/// failure during setup means there is no session, so the warning has nowhere
+/// else to go. Prefixing keeps the context that explains the error.
+fn with_warning(error: ScanError, warning: Option<String>) -> ScanError {
+    let Some(warning) = warning else {
+        return error;
+    };
+    match error {
+        // Splice into the existing message rather than nesting, so the
+        // `Bluetooth error:` prefix is not repeated.
+        ScanError::Bluetooth(message) => ScanError::Bluetooth(format!("{warning}; {message}")),
+        other => ScanError::Bluetooth(format!("{warning}; {other}")),
+    }
 }
 
 impl ScanExitBehavior {
@@ -196,18 +214,33 @@ pub async fn start_scan(
     let cmd_socket = HciSocket::open(dev_id)?;
     cmd_socket.set_command_filter()?;
 
+    let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
+    let (warn_tx, warn_rx) = mpsc::unbounded_channel::<String>();
+
     // Settle what shutdown will do before the scan is configured, since
     // configuring it replaces any scan already running. If the query fails we
     // assume the controller was idle, so the scan we are about to start counts
     // as ours.
-    let prior = le_scan_state(&cmd_socket).unwrap_or_else(|e| {
-        eprintln!("failed to query LE scan state: {e}");
-        ScanState::default()
-    });
+    //
+    // The warning is held back rather than sent straight away: if configuring
+    // the scan then fails there is no session to carry it, so it rides along on
+    // the error instead of being dropped with the channel.
+    let (prior, state_warning) = match le_scan_state(&cmd_socket) {
+        Ok(prior) => (prior, None),
+        Err(e) => (
+            ScanState::default(),
+            Some(format!("failed to query LE scan state: {e}")),
+        ),
+    };
     let shutdown = scan_exit.shutdown_for(prior);
-    let mode = configure_le_scan(&cmd_socket)?;
+    let mode = match configure_le_scan(&cmd_socket) {
+        Ok(mode) => mode,
+        Err(e) => return Err(with_warning(e, state_warning)),
+    };
+    if let Some(warning) = state_warning {
+        let _ = warn_tx.send(warning);
+    }
 
-    let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
 
@@ -233,7 +266,7 @@ pub async fn start_scan(
                     };
 
                     // Drain all available packets before waiting again.
-                    if !drain_events(&mut guard, &mut buf, &tx, verbose).await {
+                    if !drain_events(&mut guard, &mut buf, &tx, &warn_tx, verbose).await {
                         break 'receive;
                     }
                 }
@@ -244,24 +277,29 @@ pub async fn start_scan(
         // reported, not propagated: the scan is already over and there is
         // nothing left to abort.
         let finished = match shutdown {
-            ScanShutdown::Stop => disable_le_scan(&cmd_socket, mode),
+            ScanShutdown::Stop => disable_le_scan(&cmd_socket, mode).map(|()| None),
             // The controller already runs the policy we want to leave: a scan
             // this process started, or a foreign scan that matched ours.
             ScanShutdown::LeaveRunning {
                 filter_duplicates: None,
-            } => Ok(()),
+            } => Ok(None),
             // Someone else's scan: put their duplicate policy back before
             // leaving it running, so its owner does not silently inherit ours.
             ScanShutdown::LeaveRunning {
                 filter_duplicates: Some(policy),
             } => restore_le_scan_duplicates(&cmd_socket, mode, policy),
         };
-        if let Err(e) = finished {
-            eprintln!("failed to finish the LE scan on hci{dev_id}: {e}");
+        let report = match finished {
+            Ok(Some(warning)) => Some(warning),
+            Ok(None) => None,
+            Err(e) => Some(format!("failed to finish the LE scan on hci{dev_id}: {e}")),
+        };
+        if let Some(report) = report {
+            let _ = warn_tx.send(report);
         }
     });
 
-    Ok(ScanSession::managed(rx, cancel, task))
+    Ok(ScanSession::managed(rx, warn_rx, cancel, task))
 }
 
 #[cfg(test)]
@@ -372,5 +410,24 @@ mod tests {
         assert_eq!(adapters, vec!["hci2".to_string(), "hci10".to_string()]);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_with_warning_keeps_both_messages_without_repeating_the_prefix() {
+        let error = || ScanError::Bluetooth("HCI command 0x200c failed".to_string());
+
+        // The warning rides along in front of the error it explains. `ScanError`
+        // renders its own prefix, so nesting the error in the message instead
+        // of splicing would double it.
+        let rendered =
+            with_warning(error(), Some("failed to query LE scan state".to_string())).to_string();
+        assert_eq!(
+            rendered,
+            "Bluetooth error: failed to query LE scan state; HCI command 0x200c failed"
+        );
+        assert_eq!(rendered.matches("Bluetooth error:").count(), 1);
+
+        // No warning leaves the error exactly as it was.
+        assert_eq!(with_warning(error(), None).to_string(), error().to_string());
     }
 }
