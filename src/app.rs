@@ -22,9 +22,10 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Output format for measurements.
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ValueEnum, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
     /// InfluxDB line protocol (default).
+    #[default]
     #[value(name = "influxdb")]
     InfluxDb,
     /// JSON Lines: one JSON object per line.
@@ -75,6 +76,25 @@ pub struct Options {
     /// What the HCI backend does with the adapter's LE scan on exit
     #[arg(long, default_value_t, value_enum)]
     pub hci_scan_exit_behavior: ScanExitBehavior,
+}
+
+impl Default for Options {
+    /// The configuration the CLI produces when no flag is given: one
+    /// `Default` instead of a repeated field-by-field literal at every call
+    /// site, in tests and in embedders.
+    fn default() -> Self {
+        Self {
+            influxdb_measurement: "ruuvi_measurement".to_string(),
+            format: OutputFormat::default(),
+            aliases: Vec::new(),
+            only_aliased: false,
+            verbose: false,
+            throttle: None,
+            backend: Backend::default(),
+            adapter: None,
+            hci_scan_exit_behavior: ScanExitBehavior::default(),
+        }
+    }
 }
 
 /// Errors returned by the core run loop.
@@ -169,12 +189,12 @@ pub async fn run_with_io(
     let mut e1_devices: HashSet<MacAddress> = HashSet::new();
 
     let mut session = scanner
-        .start_scan((
-            options.backend,
-            options.verbose,
-            options.adapter,
-            options.hci_scan_exit_behavior,
-        ))
+        .start_scan(ScanConfig {
+            backend: options.backend,
+            verbose: options.verbose,
+            adapter: options.adapter,
+            scan_exit: options.hci_scan_exit_behavior,
+        })
         .await?;
 
     tokio::pin!(stop);
@@ -320,6 +340,28 @@ mod tests {
     }
 
     #[test]
+    fn default_options_match_the_no_flag_command_line() {
+        // Tests and embedders build `Options::default()` instead of spelling
+        // out every field; that is only honest while it equals what the CLI
+        // produces with no flags. A new `#[arg(default_value...)]` must show
+        // up here.
+        let parsed = Options::try_parse_from(["ruuvitag-listener"]).expect("no flags is valid");
+        let default = Options::default();
+        assert_eq!(parsed.influxdb_measurement, default.influxdb_measurement);
+        assert_eq!(parsed.format, default.format);
+        assert_eq!(parsed.aliases.len(), default.aliases.len());
+        assert_eq!(parsed.only_aliased, default.only_aliased);
+        assert_eq!(parsed.verbose, default.verbose);
+        assert_eq!(parsed.throttle, default.throttle);
+        assert_eq!(parsed.backend, default.backend);
+        assert_eq!(parsed.adapter, default.adapter);
+        assert_eq!(
+            parsed.hci_scan_exit_behavior,
+            default.hci_scan_exit_behavior
+        );
+    }
+
+    #[test]
     fn hci_scan_exit_behavior_flag_name_is_stable() {
         // The flag name is derived from the field name, so renaming the field
         // would silently rename a user-facing option. Pin it here.
@@ -357,15 +399,11 @@ mod tests {
         // the scanner; the other Scanner fakes ignore their ScanConfig, so
         // without this the whole wiring could be dropped and stay green.
         let options = Options {
-            influxdb_measurement: "ruuvi_measurement".to_string(),
-            format: OutputFormat::InfluxDb,
-            aliases: vec![],
             verbose: true,
-            throttle: None,
             backend: Backend::Hci,
             adapter: Some("hci1".to_string()),
-            only_aliased: false,
             hci_scan_exit_behavior: ScanExitBehavior::Never,
+            ..Default::default()
         };
 
         let scanner = ConfigCapturingScanner::default();
@@ -382,11 +420,11 @@ mod tests {
         .unwrap();
 
         let seen = scanner.seen.lock().unwrap().clone();
-        let (backend, verbose, adapter, scan_exit) = seen.expect("the scanner was started");
-        assert_eq!(backend, Backend::Hci);
-        assert!(verbose);
-        assert_eq!(adapter.as_deref(), Some("hci1"));
-        assert_eq!(scan_exit, ScanExitBehavior::Never);
+        let seen = seen.expect("the scanner was started");
+        assert_eq!(seen.backend, Backend::Hci);
+        assert!(seen.verbose);
+        assert_eq!(seen.adapter.as_deref(), Some("hci1"));
+        assert_eq!(seen.scan_exit, ScanExitBehavior::Never);
     }
 
     #[tokio::test]
@@ -413,17 +451,7 @@ mod tests {
             }
         }
 
-        let options = Options {
-            influxdb_measurement: "ruuvi_measurement".to_string(),
-            format: OutputFormat::InfluxDb,
-            aliases: vec![],
-            verbose: false,
-            throttle: None,
-            backend: Backend::default(),
-            adapter: None,
-            only_aliased: false,
-            hci_scan_exit_behavior: ScanExitBehavior::default(),
-        };
+        let options = Options::default();
 
         let mut out = Vec::<u8>::new();
         let mut err = Vec::<u8>::new();
@@ -450,17 +478,7 @@ mod tests {
         let m = measurement(mac, timestamp);
 
         let scanner = FakeScanner::new(vec![Ok(m)]);
-        let options = Options {
-            influxdb_measurement: "ruuvi_measurement".to_string(),
-            format: OutputFormat::InfluxDb,
-            aliases: vec![],
-            verbose: false,
-            throttle: None,
-            backend: Backend::default(),
-            adapter: None,
-            only_aliased: false,
-            hci_scan_exit_behavior: ScanExitBehavior::default(),
-        };
+        let options = Options::default();
 
         let mut out = Vec::<u8>::new();
         let mut err = Vec::<u8>::new();
@@ -492,15 +510,8 @@ mod tests {
 
         let scanner = FakeScanner::new(vec![Ok(m1), Ok(m2)]);
         let options = Options {
-            influxdb_measurement: "ruuvi_measurement".to_string(),
-            format: OutputFormat::InfluxDb,
-            aliases: vec![],
-            verbose: false,
             throttle: Some(Duration::from_secs(3600)),
-            backend: Backend::default(),
-            adapter: None,
-            only_aliased: false,
-            hci_scan_exit_behavior: ScanExitBehavior::default(),
+            ..Default::default()
         };
 
         let mut out = Vec::<u8>::new();
@@ -569,17 +580,7 @@ mod tests {
             Ok(measurement_with_format(mac, ts, Format::E1)),
             Ok(measurement_with_format(mac, ts, Format::V6)),
         ]);
-        let options = Options {
-            influxdb_measurement: "ruuvi_measurement".to_string(),
-            format: OutputFormat::InfluxDb,
-            aliases: vec![],
-            verbose: false,
-            throttle: None,
-            backend: Backend::default(),
-            adapter: None,
-            only_aliased: false,
-            hci_scan_exit_behavior: ScanExitBehavior::default(),
-        };
+        let options = Options::default();
 
         let mut out = Vec::<u8>::new();
         let mut err = Vec::<u8>::new();
@@ -646,17 +647,7 @@ mod tests {
             "bad packet".to_string(),
         ))]);
 
-        let base = Options {
-            influxdb_measurement: "ruuvi_measurement".to_string(),
-            format: OutputFormat::InfluxDb,
-            aliases: vec![],
-            verbose: false,
-            throttle: None,
-            backend: Backend::default(),
-            adapter: None,
-            only_aliased: false,
-            hci_scan_exit_behavior: ScanExitBehavior::default(),
-        };
+        let base = Options::default();
 
         // non-verbose: nothing written
         let mut out = Vec::<u8>::new();
@@ -701,15 +692,8 @@ mod tests {
 
         let scanner = FakeScanner::new(vec![Ok(m)]);
         let options = Options {
-            influxdb_measurement: "ruuvi_measurement".to_string(),
             format: OutputFormat::Csv,
-            aliases: vec![],
-            verbose: false,
-            throttle: None,
-            backend: Backend::default(),
-            adapter: None,
-            only_aliased: false,
-            hci_scan_exit_behavior: ScanExitBehavior::default(),
+            ..Default::default()
         };
 
         let mut out = Vec::<u8>::new();
@@ -741,15 +725,8 @@ mod tests {
 
         let scanner = FakeScanner::new(vec![Ok(m)]);
         let options = Options {
-            influxdb_measurement: "ruuvi_measurement".to_string(),
             format: OutputFormat::Jsonl,
-            aliases: vec![],
-            verbose: false,
-            throttle: None,
-            backend: Backend::default(),
-            adapter: None,
-            only_aliased: false,
-            hci_scan_exit_behavior: ScanExitBehavior::default(),
+            ..Default::default()
         };
 
         let mut out = Vec::<u8>::new();

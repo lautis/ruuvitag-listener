@@ -132,9 +132,10 @@ A listener that attached to a scan another process owned used to disable that
 scan when it exited. The default is now `--hci-scan-exit-behavior owned-only`,
 which leaves it running; pass `always` to restore the old unconditional stop.
 
-`Scanner::start_scan` takes a `ScanConfig` tuple instead of separate `backend`,
-`verbose` and `adapter` arguments, so implementations of that trait need
-updating.
+`Scanner::start_scan` takes a single `ScanConfig` struct instead of separate
+`backend`, `verbose` and `adapter` arguments, so implementations of that trait
+need updating. `Options` now implements `Default`, matching what the CLI produces
+with no flags.
 
 Example output:
 

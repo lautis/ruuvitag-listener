@@ -212,68 +212,23 @@ pub enum ScanExitBehavior {
     Never,
 }
 
-impl ScanExitBehavior {
-    /// Resolve to a definite [`ScanShutdown`] once the controller's prior scan
-    /// state is known.
-    ///
-    /// `Always` is the only behavior that ignores `was_active`: it stops the
-    /// scan either way. The other two need it, because a pre-existing scan
-    /// has a duplicate policy worth putting back and a scan this process
-    /// started does not. Resolving once, up front, keeps `OwnedOnly` from
-    /// having to be interpreted anywhere else.
-    pub fn resolve(self, was_active: bool) -> ScanShutdown {
-        match self {
-            Self::Always => ScanShutdown::Stop,
-            Self::Never if was_active => ScanShutdown::RestoreAndLeaveRunning,
-            Self::Never => ScanShutdown::LeaveRunning,
-            Self::OwnedOnly if was_active => ScanShutdown::RestoreAndLeaveRunning,
-            Self::OwnedOnly => ScanShutdown::Stop,
-        }
-    }
-
-    /// Whether resolving this behavior needs the controller's current scan
-    /// state. `Always` does not, so it can skip the HCI round-trip entirely.
-    ///
-    /// `OwnedOnly` needs the state to tell a scan it started from one another
-    /// process owns, and `Never` needs it for the same reason: both can end up
-    /// leaving a foreign scan running, whose duplicate policy has to be put
-    /// back. `Never` reads the state even when it ends up owning the scan,
-    /// which it cannot know in advance.
-    ///
-    /// Read the state only when this returns true, then pass it to
-    /// [`Self::resolve`].
-    pub fn needs_scan_state(self) -> bool {
-        !matches!(self, Self::Always)
-    }
-}
-
-/// What shutdown does with the adapter's LE scan, once the configured
-/// [`ScanExitBehavior`] has been resolved against the controller's state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScanShutdown {
-    /// Send `LE Set Scan Enable (disable)` so the adapter stops scanning.
-    Stop,
-    /// Leave the adapter scanning with the duplicate policy this process
-    /// configured, because this process is the one that started the scan.
-    LeaveRunning,
-    /// Leave the adapter scanning, but re-apply the duplicate policy that was
-    /// configured before this process attached to the scan. Only the duplicate
-    /// policy can be put back; the rest of the previous configuration is not
-    /// readable and stays as this process set it.
-    ///
-    /// If the scan is no longer running by then — its owner may have stopped it
-    /// while this process ran — nothing is sent, since setting the policy would
-    /// re-enable scanning as a side effect.
-    RestoreAndLeaveRunning,
-}
-
-/// Everything a backend needs to start a scan, as
-/// `(backend, verbose, adapter, scan_exit)`.
+/// Everything a backend needs to start a scan.
 ///
 /// One grouped argument instead of a positional per option, so adding an
 /// option does not widen the signature of [`crate::app::Scanner::start_scan`]
 /// and every backend entry point.
-pub type ScanConfig = (Backend, bool, Option<String>, ScanExitBehavior);
+#[derive(Debug, Default, Clone)]
+pub struct ScanConfig {
+    /// Which backend to scan with.
+    pub backend: Backend,
+    /// Whether decode errors are forwarded to the consumer as `Err` values
+    /// instead of being dropped.
+    pub verbose: bool,
+    /// Kernel adapter name (e.g. "hci1"), or `None` for the backend default.
+    pub adapter: Option<String>,
+    /// What the HCI backend does with the adapter's LE scan on shutdown.
+    pub scan_exit: ScanExitBehavior,
+}
 
 impl std::fmt::Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -407,7 +362,12 @@ pub fn decode_ruuvi_data(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
 /// [`ScanSession::stop`], which lets the backend disable the adapter's scan
 /// according to the configured [`ScanExitBehavior`].
 pub async fn start_scan(config: ScanConfig) -> Result<ScanSession, ScanError> {
-    let (backend, verbose, adapter, scan_exit) = config;
+    let ScanConfig {
+        backend,
+        verbose,
+        adapter,
+        scan_exit,
+    } = config;
     match backend {
         #[cfg(feature = "bluer")]
         Backend::Bluer => {
@@ -632,53 +592,6 @@ mod tests {
             ScanExitBehavior::Always
         );
         assert!(<ScanExitBehavior as ValueEnum>::from_str("maybe", false).is_err());
-    }
-
-    #[test]
-    fn test_resolve_owned_only_follows_prior_scan_state() {
-        // Idle beforehand: the scan is ours, so we stop it.
-        assert_eq!(
-            ScanExitBehavior::OwnedOnly.resolve(false),
-            ScanShutdown::Stop
-        );
-        // Someone else was already scanning: leave their scan running, with
-        // the duplicate policy they had.
-        assert_eq!(
-            ScanExitBehavior::OwnedOnly.resolve(true),
-            ScanShutdown::RestoreAndLeaveRunning
-        );
-    }
-
-    #[test]
-    fn test_resolve_always_ignores_prior_scan_state() {
-        for was_active in [false, true] {
-            assert_eq!(
-                ScanExitBehavior::Always.resolve(was_active),
-                ScanShutdown::Stop
-            );
-        }
-    }
-
-    #[test]
-    fn test_resolve_leaving_a_foreign_scan_running_restores_it() {
-        // `never` still differs by prior state: a pre-existing scan gets its
-        // duplicate policy back, one we started keeps the policy we set.
-        assert_eq!(
-            ScanExitBehavior::Never.resolve(true),
-            ScanShutdown::RestoreAndLeaveRunning
-        );
-        assert_eq!(
-            ScanExitBehavior::Never.resolve(false),
-            ScanShutdown::LeaveRunning
-        );
-    }
-
-    #[test]
-    fn test_only_always_skips_reading_scan_state() {
-        assert!(ScanExitBehavior::OwnedOnly.needs_scan_state());
-        assert!(ScanExitBehavior::Never.needs_scan_state());
-        // `always` must not pay for the HCI round-trip.
-        assert!(!ScanExitBehavior::Always.needs_scan_state());
     }
 
     // Backend variants are feature-gated, so each assertion pair is gated with

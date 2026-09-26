@@ -25,6 +25,6 @@ pub use output::influxdb::InfluxDbFormatter;
 pub use output::jsonl::JsonLinesFormatter;
 pub use scanner::{
     Backend, DecodeError, MeasurementResult, ScanConfig, ScanError, ScanExitBehavior, ScanSession,
-    ScanShutdown, decode_ruuvi_data,
+    decode_ruuvi_data,
 };
 pub use throttle::{Throttle, parse_duration};

@@ -427,7 +427,7 @@ pub(crate) fn le_scan_state(fd: &HciSocket) -> Result<ScanState, ScanError> {
 /// Extended Advertising Reports, so they must be driven with the extended
 /// commands.
 #[derive(Clone, Copy)]
-enum ScanMode {
+pub(crate) enum ScanMode {
     Legacy,
     Extended,
 }
@@ -515,24 +515,21 @@ impl ScanMode {
 /// the duplicate-filtering policy is put back afterwards, by
 /// [`restore_le_scan_duplicates`]; the rest is not readable.
 fn configure_scan(fd: &HciSocket, mode: ScanMode) -> Result<(), ScanError> {
-    set_scan_enable(fd, mode, false)?;
+    set_scan_enable_with_duplicates(fd, mode, false, false)?;
     let params = mode.set_params_bytes();
     fd.command_checked(OGF_LE_CTL, mode.set_params_ocf(), &params)?;
-    set_scan_enable(fd, mode, true)
-}
-
-/// Enable or disable LE scanning with this process's duplicate policy.
-///
-/// This listener never asks the controller to filter duplicates: RuuviTags
-/// re-broadcast largely unchanged payloads, so controller-side deduplication
-/// would discard measurements we still want to see. Only
-/// [`restore_le_scan_duplicates`] sets a different policy.
-fn set_scan_enable(fd: &HciSocket, mode: ScanMode, enable: bool) -> Result<(), ScanError> {
-    set_scan_enable_with_duplicates(fd, mode, enable, false)
+    set_scan_enable_with_duplicates(fd, mode, true, false)?;
+    Ok(())
 }
 
 /// Enable or disable LE scanning, tolerating "Command Disallowed" when
 /// disabling an already-disabled scan.
+///
+/// `filter_duplicates` picks the controller-side dedup policy, and this
+/// listener asks for `false` on every path except putting someone else's
+/// policy back: RuuviTags re-broadcast largely unchanged payloads, so
+/// controller-side deduplication would discard measurements we still want to
+/// see.
 fn set_scan_enable_with_duplicates(
     fd: &HciSocket,
     mode: ScanMode,
@@ -551,17 +548,20 @@ fn set_scan_enable_with_duplicates(
 }
 
 /// Configure LE scanning, preferring extended scanning when the controller
-/// supports it.
-pub(crate) fn configure_le_scan(fd: &HciSocket) -> Result<(), ScanError> {
-    configure_scan(fd, ScanMode::for_controller(fd)?)
+/// supports it, and report the mode used so shutdown can speak the same
+/// command family without re-querying the controller's features.
+pub(crate) fn configure_le_scan(fd: &HciSocket) -> Result<ScanMode, ScanError> {
+    let mode = ScanMode::for_controller(fd)?;
+    configure_scan(fd, mode)?;
+    Ok(mode)
 }
 
 /// Disable LE scanning on the controller, matching the mode used to start it.
 ///
 /// The controller's feature set determines which disable command it accepts
 /// (legacy vs extended).
-pub(crate) fn disable_le_scan(fd: &HciSocket) -> Result<(), ScanError> {
-    set_scan_enable(fd, ScanMode::for_controller(fd)?, false)
+pub(crate) fn disable_le_scan(fd: &HciSocket, mode: ScanMode) -> Result<(), ScanError> {
+    set_scan_enable_with_duplicates(fd, mode, false, false)
 }
 
 /// Put back the duplicate-filtering policy of a scan this process attached to.
@@ -576,9 +576,8 @@ pub(crate) fn disable_le_scan(fd: &HciSocket) -> Result<(), ScanError> {
 /// The re-read is what keeps this from starting a scan nobody wants: whoever
 /// owned the scan may have stopped it while this process was running, and
 /// setting `Filter_Duplicates` means sending `LE Set Scan Enable`, which
-/// re-enables scanning as a side effect. Returns whether the policy was
-/// restored; `false` means the controller is no longer scanning, so there was
-/// nothing to put back and nothing was sent.
+/// re-enables scanning as a side effect. When that has happened there is
+/// nothing to put back, so nothing is sent and the reason is logged.
 ///
 /// The scan is cycled rather than re-enabled in place. A controller that
 /// rejects a redundant `LE Set Scan Enable` answers `Command Disallowed` (see
@@ -588,15 +587,15 @@ pub(crate) fn disable_le_scan(fd: &HciSocket) -> Result<(), ScanError> {
 /// cost is a scan gap of one command round trip, at process exit.
 pub(crate) fn restore_le_scan_duplicates(
     fd: &HciSocket,
+    mode: ScanMode,
     filter_duplicates: bool,
-) -> Result<bool, ScanError> {
+) -> Result<(), ScanError> {
     if !le_scan_state(fd)?.enabled {
-        return Ok(false);
+        eprintln!("LE scan stopped while we ran; not restoring its duplicate policy");
+        return Ok(());
     }
-    let mode = ScanMode::for_controller(fd)?;
-    set_scan_enable(fd, mode, false)?;
-    set_scan_enable_with_duplicates(fd, mode, true, filter_duplicates)?;
-    Ok(true)
+    set_scan_enable_with_duplicates(fd, mode, false, false)?;
+    set_scan_enable_with_duplicates(fd, mode, true, filter_duplicates)
 }
 
 /// Whether a returned status is acceptable for an LE scan enable/disable
