@@ -9,9 +9,7 @@ use ruuvitag_listener::app::{Options, Scanner, run_with_io};
 use ruuvitag_listener::{
     MacAddress, MeasurementResult, ScanConfig, ScanError, ScanSession, decode_ruuvi_data,
 };
-use std::future::Future;
 use std::hint::black_box;
-use std::pin::Pin;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 
@@ -63,20 +61,15 @@ impl FakeScanner {
 }
 
 impl Scanner for FakeScanner {
-    fn start_scan(
-        &self,
-        _config: ScanConfig,
-    ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>> {
+    async fn start_scan(&self, _config: ScanConfig) -> Result<ScanSession, ScanError> {
         let results = self.results.clone();
-        Box::pin(async move {
-            let (tx, rx) = mpsc::channel::<MeasurementResult>(results.len().max(1));
-            tokio::spawn(async move {
-                for r in results {
-                    let _ = tx.send(r).await;
-                }
-            });
-            Ok(ScanSession::unmanaged(rx))
-        })
+        let (tx, rx) = mpsc::channel::<MeasurementResult>(results.len().max(1));
+        tokio::spawn(async move {
+            for r in results {
+                let _ = tx.send(r).await;
+            }
+        });
+        Ok(ScanSession::unmanaged(rx))
     }
 }
 

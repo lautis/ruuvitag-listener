@@ -17,7 +17,6 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::io;
 use std::io::Write;
-use std::pin::Pin;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -111,7 +110,7 @@ pub trait Scanner: Send + Sync {
     fn start_scan(
         &self,
         config: ScanConfig,
-    ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>>;
+    ) -> impl Future<Output = Result<ScanSession, ScanError>> + Send;
 }
 
 /// Real scanner implementation that delegates to the compiled-in backends.
@@ -119,11 +118,8 @@ pub trait Scanner: Send + Sync {
 pub struct RealScanner;
 
 impl Scanner for RealScanner {
-    fn start_scan(
-        &self,
-        config: ScanConfig,
-    ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>> {
-        Box::pin(async move { crate::scanner::start_scan(config).await })
+    async fn start_scan(&self, config: ScanConfig) -> Result<ScanSession, ScanError> {
+        crate::scanner::start_scan(config).await
     }
 }
 
@@ -167,7 +163,7 @@ fn write_measurement(
 ///   adapter's LE scan before the process exits.
 pub async fn run_with_io(
     options: Options,
-    scanner: &dyn Scanner,
+    scanner: &impl Scanner,
     out: &mut dyn Write,
     err: &mut dyn Write,
     stop: impl Future<Output = ()> + Send,
@@ -278,18 +274,13 @@ mod tests {
     }
 
     impl Scanner for ConfigCapturingScanner {
-        fn start_scan(
-            &self,
-            config: ScanConfig,
-        ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>> {
+        async fn start_scan(&self, config: ScanConfig) -> Result<ScanSession, ScanError> {
             *self.seen.lock().unwrap() = Some(config);
-            Box::pin(async move {
-                // No measurements, and the sender is dropped straight away so
-                // the run loop ends on its own.
-                let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
-                drop(tx);
-                Ok(ScanSession::unmanaged(rx))
-            })
+            // No measurements, and the sender is dropped straight away so
+            // the run loop ends on its own.
+            let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
+            drop(tx);
+            Ok(ScanSession::unmanaged(rx))
         }
     }
 
@@ -307,21 +298,16 @@ mod tests {
     }
 
     impl Scanner for FakeScanner {
-        fn start_scan(
-            &self,
-            _config: ScanConfig,
-        ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>> {
+        async fn start_scan(&self, _config: ScanConfig) -> Result<ScanSession, ScanError> {
             let results = self.results.lock().unwrap().clone();
-            Box::pin(async move {
-                let (tx, rx) = mpsc::channel::<MeasurementResult>(results.len().max(1));
-                tokio::spawn(async move {
-                    for r in results {
-                        let _ = tx.send(r).await;
-                    }
-                    // drop tx to close channel
-                });
-                Ok(ScanSession::unmanaged(rx))
-            })
+            let (tx, rx) = mpsc::channel::<MeasurementResult>(results.len().max(1));
+            tokio::spawn(async move {
+                for r in results {
+                    let _ = tx.send(r).await;
+                }
+                // drop tx to close channel
+            });
+            Ok(ScanSession::unmanaged(rx))
         }
     }
 
@@ -453,20 +439,14 @@ mod tests {
         struct InfiniteScanner;
 
         impl Scanner for InfiniteScanner {
-            fn start_scan(
-                &self,
-                _config: ScanConfig,
-            ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>>
-            {
-                Box::pin(async move {
-                    let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
-                    // Keep the sender alive forever so the channel stays open.
-                    tokio::spawn(async move {
-                        let _tx = tx;
-                        std::future::pending::<()>().await;
-                    });
-                    Ok(ScanSession::unmanaged(rx))
-                })
+            async fn start_scan(&self, _config: ScanConfig) -> Result<ScanSession, ScanError> {
+                let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
+                // Keep the sender alive forever so the channel stays open.
+                tokio::spawn(async move {
+                    let _tx = tx;
+                    std::future::pending::<()>().await;
+                });
+                Ok(ScanSession::unmanaged(rx))
             }
         }
 
@@ -778,23 +758,18 @@ mod tests {
     }
 
     impl Scanner for EagerWarningScanner {
-        fn start_scan(
-            &self,
-            _config: ScanConfig,
-        ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>> {
-            Box::pin(async move {
-                let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
-                let (warn_tx, warn_rx) = mpsc::unbounded_channel::<String>();
-                let cancel = CancellationToken::new();
-                let task_cancel = cancel.clone();
-                let warning = self.warning;
-                let task = tokio::spawn(async move {
-                    let _ = warn_tx.send(warning.to_string());
-                    task_cancel.cancelled().await;
-                    drop(tx);
-                });
-                Ok(ScanSession::managed(rx, warn_rx, cancel, task))
-            })
+        async fn start_scan(&self, _config: ScanConfig) -> Result<ScanSession, ScanError> {
+            let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
+            let (warn_tx, warn_rx) = mpsc::unbounded_channel::<String>();
+            let cancel = CancellationToken::new();
+            let task_cancel = cancel.clone();
+            let warning = self.warning;
+            let task = tokio::spawn(async move {
+                let _ = warn_tx.send(warning.to_string());
+                task_cancel.cancelled().await;
+                drop(tx);
+            });
+            Ok(ScanSession::managed(rx, warn_rx, cancel, task))
         }
     }
 
@@ -805,23 +780,18 @@ mod tests {
     }
 
     impl Scanner for StopWarningScanner {
-        fn start_scan(
-            &self,
-            _config: ScanConfig,
-        ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>> {
-            Box::pin(async move {
-                let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
-                let (warn_tx, warn_rx) = mpsc::unbounded_channel::<String>();
-                let cancel = CancellationToken::new();
-                let task_cancel = cancel.clone();
-                let warning = self.warning;
-                let task = tokio::spawn(async move {
-                    task_cancel.cancelled().await;
-                    let _ = warn_tx.send(warning.to_string());
-                    drop(tx);
-                });
-                Ok(ScanSession::managed(rx, warn_rx, cancel, task))
-            })
+        async fn start_scan(&self, _config: ScanConfig) -> Result<ScanSession, ScanError> {
+            let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
+            let (warn_tx, warn_rx) = mpsc::unbounded_channel::<String>();
+            let cancel = CancellationToken::new();
+            let task_cancel = cancel.clone();
+            let warning = self.warning;
+            let task = tokio::spawn(async move {
+                task_cancel.cancelled().await;
+                let _ = warn_tx.send(warning.to_string());
+                drop(tx);
+            });
+            Ok(ScanSession::managed(rx, warn_rx, cancel, task))
         }
     }
 
@@ -893,17 +863,12 @@ mod tests {
     }
 
     impl Scanner for NoWarningScanner {
-        fn start_scan(
-            &self,
-            _config: ScanConfig,
-        ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>> {
-            Box::pin(async move {
-                let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
-                // Keep the scan alive for the whole test; `unmanaged` drops the
-                // warnings sender, so its channel is closed from the start.
-                *self.hold.lock().unwrap() = Some(tx);
-                Ok(ScanSession::unmanaged(rx))
-            })
+        async fn start_scan(&self, _config: ScanConfig) -> Result<ScanSession, ScanError> {
+            let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
+            // Keep the scan alive for the whole test; `unmanaged` drops the
+            // warnings sender, so its channel is closed from the start.
+            *self.hold.lock().unwrap() = Some(tx);
+            Ok(ScanSession::unmanaged(rx))
         }
     }
 
