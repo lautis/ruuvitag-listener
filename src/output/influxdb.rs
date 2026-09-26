@@ -1,6 +1,6 @@
 //! InfluxDB line protocol output formatter.
 
-use crate::measurement::Measurement;
+use crate::measurement::{Measurement, fields};
 use crate::output::OutputFormatter;
 use std::fmt::Write;
 use std::time::SystemTime;
@@ -20,12 +20,6 @@ pub struct InfluxDbFormatter {
 }
 
 impl InfluxDbFormatter {
-    /// Convert pressure from Pascals to kilopascals.
-    #[inline]
-    fn pressure_kpa(pascals: f64) -> f64 {
-        pascals / 1000.0
-    }
-
     /// Create a new InfluxDB formatter.
     ///
     /// # Arguments
@@ -123,59 +117,27 @@ impl InfluxDbFormatter {
 
     /// Write fields directly to the buffer (no intermediate BTreeMap).
     ///
-    /// Only writes fields that have values. Uses a macro to avoid code duplication.
+    /// Only writes fields that have values, taking names and order from the
+    /// measurement field schema. The acceleration components are written
+    /// after the scalar fields: line protocol field order is not semantic and
+    /// this is the line layout this formatter has always emitted.
     #[inline]
     fn write_fields(buf: &mut String, m: &Measurement) {
         let mut first = true;
-
-        // Macro to write a field if present, handling the comma separator.
-        macro_rules! write_field {
-            ($name:literal, $val:expr) => {
-                if let Some(v) = $val {
-                    if first {
-                        first = false;
-                    } else {
-                        buf.push(',');
-                    }
-                    let _ = write!(buf, "{}={}", $name, v);
+        for spec in fields::FIELDS
+            .iter()
+            .filter(|spec| !spec.vector)
+            .chain(fields::FIELDS.iter().filter(|spec| spec.vector))
+        {
+            if let Some(v) = (spec.get)(m) {
+                if first {
+                    first = false;
+                } else {
+                    buf.push(',');
                 }
-            };
-        }
-
-        write_field!("temperature", m.temperature);
-        write_field!("humidity", m.humidity);
-        write_field!("pressure", m.pressure.map(Self::pressure_kpa));
-        write_field!("battery_potential", m.battery);
-        write_field!("tx_power", m.tx_power.map(f64::from));
-        write_field!("rssi", m.rssi.map(f64::from));
-        write_field!("movement_counter", m.movement_counter.map(f64::from));
-        write_field!(
-            "measurement_sequence_number",
-            m.measurement_sequence.map(f64::from)
-        );
-        write_field!("pm1_0", m.pm1_0);
-        write_field!("pm2_5", m.pm2_5);
-        write_field!("pm4_0", m.pm4_0);
-        write_field!("pm10_0", m.pm10_0);
-        write_field!("co2", m.co2);
-        write_field!("voc_index", m.voc_index);
-        write_field!("nox_index", m.nox_index);
-        write_field!("luminosity", m.luminosity);
-
-        // Handle acceleration tuple specially
-        if let Some((x, y, z)) = m.acceleration {
-            if first {
-                first = false;
-            } else {
-                buf.push(',');
+                let _ = write!(buf, "{}={}", spec.name, v);
             }
-            let _ = write!(
-                buf,
-                "acceleration_x={},acceleration_y={},acceleration_z={}",
-                x, y, z
-            );
         }
-        let _ = first; // suppress unused warning
     }
 
     /// Write timestamp as nanoseconds since Unix epoch.
@@ -427,5 +389,76 @@ mod tests {
         // Should escape spaces and commas in measurement name
         // "ruuvi tag, v2" becomes "ruuvi\\ tag\\,\\ v2" (space after comma is also escaped)
         assert!(result.starts_with("ruuvi\\ tag\\,\\ v2"));
+    }
+
+    fn full_measurement() -> Measurement {
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_nanos(1_546_681_655_691_300_729);
+        let mut measurement = base_measurement(TEST_MAC, timestamp);
+        measurement.temperature = Some(19.63);
+        measurement.humidity = Some(19.5);
+        measurement.pressure = Some(101481.0);
+        measurement.battery = Some(3.007);
+        measurement.tx_power = Some(-128);
+        measurement.rssi = Some(127);
+        measurement.movement_counter = Some(4294967295);
+        measurement.measurement_sequence = Some(1234);
+        measurement.acceleration = Some((-0.055, -0.032, 0.998));
+        measurement.pm1_0 = Some(5.5);
+        measurement.pm2_5 = Some(12.5);
+        measurement.pm4_0 = Some(8.2);
+        measurement.pm10_0 = Some(15.1);
+        measurement.co2 = Some(420.0);
+        measurement.voc_index = Some(123.0);
+        measurement.nox_index = Some(45.0);
+        measurement.luminosity = Some(10.0);
+        measurement
+    }
+
+    // Exact lines pin what the assertions above skim over: field order,
+    // separators, and the rendering of every value (including pm1_0, pm4_0
+    // and pm10_0).
+
+    #[test]
+    fn test_influxdb_formatter_exact_line() {
+        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
+        let result = formatter.format(&full_measurement(), "Sauna");
+
+        assert_eq!(
+            result,
+            "ruuvi,mac=AA:BB:CC:DD:EE:FF,name=Sauna temperature=19.63,humidity=19.5,\
+             pressure=101.481,battery_potential=3.007,tx_power=-128,rssi=127,\
+             movement_counter=4294967295,measurement_sequence_number=1234,pm1_0=5.5,\
+             pm2_5=12.5,pm4_0=8.2,pm10_0=15.1,co2=420,voc_index=123,nox_index=45,\
+             luminosity=10,acceleration_x=-0.055,acceleration_y=-0.032,acceleration_z=0.998\
+             \x201546681655691300729"
+        );
+    }
+
+    #[test]
+    fn test_influxdb_formatter_exact_line_acceleration_only() {
+        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_nanos(1_546_681_655_691_300_729);
+        let mut measurement = base_measurement(TEST_MAC, timestamp);
+        measurement.acceleration = Some((0.01, -0.02, 1.0));
+
+        assert_eq!(
+            formatter.format(&measurement, "Sauna"),
+            "ruuvi,mac=AA:BB:CC:DD:EE:FF,name=Sauna acceleration_x=0.01,acceleration_y=-0.02,\
+             acceleration_z=1\x201546681655691300729"
+        );
+    }
+
+    #[test]
+    fn test_influxdb_formatter_exact_line_without_fields() {
+        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_nanos(1_546_681_655_691_300_729);
+        let measurement = base_measurement(TEST_MAC, timestamp);
+
+        // An empty field set leaves the space separator and the space before
+        // the timestamp back to back. Pinned as-is.
+        assert_eq!(
+            formatter.format(&measurement, "Sauna"),
+            "ruuvi,mac=AA:BB:CC:DD:EE:FF,name=Sauna\x20\x201546681655691300729"
+        );
     }
 }
