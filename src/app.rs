@@ -199,6 +199,12 @@ pub async fn run_with_io(
 
     tokio::pin!(stop);
 
+    // A closed warnings channel is always ready, so the branch has to be
+    // disabled once it reports closure. Otherwise the loop spins on it for as
+    // long as the scan runs, which is every run of a backend that has no
+    // warnings to send.
+    let mut warnings_open = true;
+
     loop {
         tokio::select! {
             result = session.measurements.recv() => match result {
@@ -231,10 +237,11 @@ pub async fn run_with_io(
                 // All senders dropped: the scan ended on its own.
                 None => break,
             },
-            warning = session.warnings.recv() => {
-                if let Some(warning) = warning {
-                    writeln!(err, "{warning}")?;
-                }
+            warning = session.warnings.recv(), if warnings_open => match warning {
+                Some(warning) => writeln!(err, "{warning}")?,
+                // The backend will send no more warnings, but the scan itself
+                // may still be running, so keep looping on the other arms.
+                None => warnings_open = false,
             },
             () = &mut stop => break,
         }
@@ -261,8 +268,9 @@ mod tests {
     use crate::mac_address::MacAddress;
     use crate::scanner::{DecodeError, MeasurementResult};
     use std::sync::Mutex;
-    use std::time::SystemTime;
+    use std::time::{Duration, SystemTime};
     use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
 
     #[derive(Debug, Default)]
     struct ConfigCapturingScanner {
@@ -758,5 +766,195 @@ mod tests {
         assert!(line.contains("\"format\":\"v5\""));
         assert!(line.contains("\"temperature\":25.5"));
         assert!(line.ends_with('}'));
+    }
+
+    /// A backend that reports `warning` the moment the scan starts and then
+    /// keeps the scan running until it is stopped.
+    ///
+    /// Mirrors a real backend: the measurement channel stays open for the whole
+    /// session, so the run loop has something live to wait on.
+    struct EagerWarningScanner {
+        warning: &'static str,
+    }
+
+    impl Scanner for EagerWarningScanner {
+        fn start_scan(
+            &self,
+            _config: ScanConfig,
+        ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>> {
+            Box::pin(async move {
+                let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
+                let (warn_tx, warn_rx) = mpsc::unbounded_channel::<String>();
+                let cancel = CancellationToken::new();
+                let task_cancel = cancel.clone();
+                let warning = self.warning;
+                let task = tokio::spawn(async move {
+                    let _ = warn_tx.send(warning.to_string());
+                    task_cancel.cancelled().await;
+                    drop(tx);
+                });
+                Ok(ScanSession::managed(rx, warn_rx, cancel, task))
+            })
+        }
+    }
+
+    /// A backend that reports `warning` only while shutting down, i.e. after
+    /// the run loop has stopped listening for warnings.
+    struct StopWarningScanner {
+        warning: &'static str,
+    }
+
+    impl Scanner for StopWarningScanner {
+        fn start_scan(
+            &self,
+            _config: ScanConfig,
+        ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>> {
+            Box::pin(async move {
+                let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
+                let (warn_tx, warn_rx) = mpsc::unbounded_channel::<String>();
+                let cancel = CancellationToken::new();
+                let task_cancel = cancel.clone();
+                let warning = self.warning;
+                let task = tokio::spawn(async move {
+                    task_cancel.cancelled().await;
+                    let _ = warn_tx.send(warning.to_string());
+                    drop(tx);
+                });
+                Ok(ScanSession::managed(rx, warn_rx, cancel, task))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_warning_reaches_the_error_writer() {
+        let scanner = EagerWarningScanner {
+            warning: "failed to query LE scan state: timed out",
+        };
+        let options = Options {
+            format: OutputFormat::Jsonl,
+            ..Default::default()
+        };
+
+        let mut out = Vec::<u8>::new();
+        let mut err = Vec::<u8>::new();
+        run_with_io(
+            options,
+            &scanner,
+            &mut out,
+            &mut err,
+            tokio::time::sleep(Duration::from_millis(50)),
+        )
+        .await
+        .unwrap();
+
+        let err = String::from_utf8(err).unwrap();
+        assert!(
+            err.contains("failed to query LE scan state: timed out"),
+            "warning missing from err: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn warning_reported_during_shutdown_is_still_surfaced() {
+        // `stop` resolves straight away, so the run loop leaves before the
+        // backend task gets a chance to report anything. Only the drain after
+        // `session.stop()` can catch this warning.
+        let scanner = StopWarningScanner {
+            warning: "failed to finish the LE scan on hci0: command failed",
+        };
+        let options = Options {
+            format: OutputFormat::Jsonl,
+            ..Default::default()
+        };
+
+        let mut out = Vec::<u8>::new();
+        let mut err = Vec::<u8>::new();
+        run_with_io(
+            options,
+            &scanner,
+            &mut out,
+            &mut err,
+            std::future::ready(()),
+        )
+        .await
+        .unwrap();
+
+        let err = String::from_utf8(err).unwrap();
+        assert!(
+            err.contains("failed to finish the LE scan on hci0: command failed"),
+            "shutdown warning missing from err: {err:?}"
+        );
+    }
+
+    /// A backend with no warnings to report closes the channel at startup,
+    /// which is what the BlueZ backend does.
+    struct NoWarningScanner {
+        hold: Mutex<Option<mpsc::Sender<MeasurementResult>>>,
+    }
+
+    impl Scanner for NoWarningScanner {
+        fn start_scan(
+            &self,
+            _config: ScanConfig,
+        ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>> {
+            Box::pin(async move {
+                let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
+                // Keep the scan alive for the whole test; `unmanaged` drops the
+                // warnings sender, so its channel is closed from the start.
+                *self.hold.lock().unwrap() = Some(tx);
+                Ok(ScanSession::unmanaged(rx))
+            })
+        }
+    }
+
+    /// CPU time burned by this process so far.
+    ///
+    /// Gated on the `hci` feature because that is what pulls in `libc`; the
+    /// test itself is about `run_with_io` and needs no Bluetooth support.
+    #[cfg(feature = "hci")]
+    fn cpu_time() -> Duration {
+        let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+        unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts) };
+        Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+    }
+
+    /// A closed warnings channel is permanently ready, so an unguarded
+    /// `select!` arm would spin on it and burn a core for the whole scan. This
+    /// is the shape every backend with nothing to warn about produces.
+    #[cfg(feature = "hci")]
+    #[tokio::test]
+    async fn closed_warnings_channel_does_not_spin() {
+        let scanner = NoWarningScanner {
+            hold: Mutex::new(None),
+        };
+        let window = Duration::from_millis(200);
+        let options = Options {
+            format: OutputFormat::Jsonl,
+            ..Default::default()
+        };
+
+        let mut out = Vec::<u8>::new();
+        let mut err = Vec::<u8>::new();
+        let cpu_before = cpu_time();
+        let wall = tokio::time::Instant::now();
+        run_with_io(
+            options,
+            &scanner,
+            &mut out,
+            &mut err,
+            tokio::time::sleep(window),
+        )
+        .await
+        .unwrap();
+        let burned = cpu_time() - cpu_before;
+        let elapsed = wall.elapsed();
+
+        // An idling loop costs microseconds; a spinning one costs roughly the
+        // whole window. Half the window separates the two with room to spare on
+        // a loaded machine.
+        assert!(
+            burned * 2 < elapsed,
+            "run loop burned {burned:?} of CPU in {elapsed:?} with a closed warnings channel"
+        );
     }
 }
