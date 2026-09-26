@@ -189,6 +189,47 @@ impl Default for Backend {
     }
 }
 
+/// What the HCI backend does with the adapter's LE scan on shutdown.
+///
+/// The controller's scan state is global: a scan left running keeps the radio
+/// awake for everyone, and disabling it stops whatever process started it. A
+/// scan this process leaves running also gets its duplicate-filtering policy
+/// put back, so its owner does not silently inherit ours.
+/// The BlueZ backend is unaffected — it ends its discovery session either way.
+#[derive(clap::ValueEnum, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ScanExitBehavior {
+    /// Stop the scan on exit only if this process started it (default). A scan
+    /// that was already running is left to its original owner, with the
+    /// duplicate-filtering policy it had.
+    #[default]
+    OwnedOnly,
+    /// Always stop the scan on exit, even if another process started it. The
+    /// pre-0.9 behavior; use when this process owns the adapter.
+    Always,
+    /// Never stop the scan on exit, not even one this process started. The
+    /// adapter keeps scanning after the listener exits, with the duplicate
+    /// policy of whichever scan is running.
+    Never,
+}
+
+/// Everything a backend needs to start a scan.
+///
+/// One grouped argument instead of a positional per option, so adding an
+/// option does not widen the signature of [`crate::app::Scanner::start_scan`]
+/// and every backend entry point.
+#[derive(Debug, Default, Clone)]
+pub struct ScanConfig {
+    /// Which backend to scan with.
+    pub backend: Backend,
+    /// Whether decode errors are forwarded to the consumer as `Err` values
+    /// instead of being dropped.
+    pub verbose: bool,
+    /// Kernel adapter name (e.g. "hci1"), or `None` for the backend default.
+    pub adapter: Option<String>,
+    /// What the HCI backend does with the adapter's LE scan on shutdown.
+    pub scan_exit: ScanExitBehavior,
+}
+
 impl std::fmt::Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -309,27 +350,34 @@ pub fn decode_ruuvi_data(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
 /// Start scanning for RuuviTag devices using the specified backend.
 ///
 /// This is the main entry point for creating a scanner. It dispatches to the
-/// appropriate backend implementation based on the `backend` parameter.
+/// appropriate backend implementation based on the backend in `config`.
 ///
 /// # Arguments
-/// * `backend` - The scanner backend to use
-/// * `verbose` - If true, decode errors are sent as Err values; otherwise they're silently dropped.
-/// * `adapter` - Bluetooth adapter name (e.g. "hci0"), or `None` for the backend default.
+/// * `config` - Scan parameters: backend, verbose flag, adapter name (or
+///   `None` for the backend default) and HCI scan-exit behavior.
 ///
 /// # Returns
 /// A scan session whose `measurements` receiver yields measurements (or decode
 /// errors if verbose). The session can be stopped with
-/// [`ScanSession::stop`], which lets the backend disable the adapter's scan.
-pub async fn start_scan(
-    backend: Backend,
-    verbose: bool,
-    adapter: Option<String>,
-) -> Result<ScanSession, ScanError> {
+/// [`ScanSession::stop`], which lets the backend disable the adapter's scan
+/// according to the configured [`ScanExitBehavior`].
+pub async fn start_scan(config: ScanConfig) -> Result<ScanSession, ScanError> {
+    let ScanConfig {
+        backend,
+        verbose,
+        adapter,
+        scan_exit,
+    } = config;
     match backend {
         #[cfg(feature = "bluer")]
-        Backend::Bluer => bluer::start_scan(verbose, adapter).await,
+        Backend::Bluer => {
+            // The BlueZ backend ends its discovery session on shutdown, so
+            // the scan-exit behavior does not apply to it.
+            let _ = scan_exit;
+            bluer::start_scan(verbose, adapter).await
+        }
         #[cfg(feature = "hci")]
-        Backend::Hci => hci::start_scan(verbose, adapter).await,
+        Backend::Hci => hci::start_scan(verbose, adapter, scan_exit).await,
     }
 }
 
@@ -522,17 +570,61 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_from_str() {
+    fn test_scan_exit_behavior_value_names() {
+        use clap::ValueEnum;
+        let names: Vec<String> = ScanExitBehavior::value_variants()
+            .iter()
+            .map(|v| {
+                v.to_possible_value()
+                    .expect("every variant has a name")
+                    .get_name()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(names, vec!["owned-only", "always", "never"]);
+        assert_eq!(
+            ScanExitBehavior::default(),
+            ScanExitBehavior::OwnedOnly,
+            "owned-only is the documented default"
+        );
+        assert_eq!(
+            <ScanExitBehavior as ValueEnum>::from_str("always", false).unwrap(),
+            ScanExitBehavior::Always
+        );
+        assert!(<ScanExitBehavior as ValueEnum>::from_str("maybe", false).is_err());
+    }
+
+    // Backend variants are feature-gated, so each assertion pair is gated with
+    // the variant it names; otherwise these tests fail to compile in
+    // single-backend builds.
+    #[test]
+    #[cfg(feature = "bluer")]
+    fn test_backend_from_str_bluer() {
         assert_eq!(Backend::from_str("bluer").unwrap(), Backend::Bluer);
         assert_eq!(Backend::from_str("bluez").unwrap(), Backend::Bluer);
+    }
+
+    #[test]
+    #[cfg(feature = "hci")]
+    fn test_backend_from_str_hci() {
         assert_eq!(Backend::from_str("hci").unwrap(), Backend::Hci);
         assert_eq!(Backend::from_str("raw").unwrap(), Backend::Hci);
+    }
+
+    #[test]
+    fn test_backend_from_str_rejects_unknown() {
         assert!(Backend::from_str("invalid").is_err());
     }
 
     #[test]
-    fn test_backend_display() {
+    #[cfg(feature = "bluer")]
+    fn test_backend_display_bluer() {
         assert_eq!(format!("{}", Backend::Bluer), "bluer");
+    }
+
+    #[test]
+    #[cfg(feature = "hci")]
+    fn test_backend_display_hci() {
         assert_eq!(format!("{}", Backend::Hci), "hci");
     }
 }

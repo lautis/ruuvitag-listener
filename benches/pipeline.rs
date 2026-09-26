@@ -7,7 +7,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use ruuvitag_listener::app::{Options, Scanner, run_with_io};
 use ruuvitag_listener::{
-    Backend, MacAddress, MeasurementResult, ScanError, ScanSession, decode_ruuvi_data,
+    MacAddress, MeasurementResult, ScanConfig, ScanError, ScanSession, decode_ruuvi_data,
 };
 use std::future::Future;
 use std::hint::black_box;
@@ -65,9 +65,7 @@ impl FakeScanner {
 impl Scanner for FakeScanner {
     fn start_scan(
         &self,
-        _backend: Backend,
-        _verbose: bool,
-        _adapter: Option<String>,
+        _config: ScanConfig,
     ) -> Pin<Box<dyn Future<Output = Result<ScanSession, ScanError>> + Send + '_>> {
         let results = self.results.clone();
         Box::pin(async move {
@@ -82,19 +80,6 @@ impl Scanner for FakeScanner {
     }
 }
 
-fn default_options() -> Options {
-    Options {
-        influxdb_measurement: "ruuvi_measurement".to_string(),
-        format: ruuvitag_listener::app::OutputFormat::InfluxDb,
-        aliases: vec![],
-        only_aliased: false,
-        verbose: false,
-        throttle: None,
-        backend: Backend::Bluer,
-        adapter: None,
-    }
-}
-
 /// Benchmark the full application pipeline: scanner -> decode -> throttle -> format -> write
 fn bench_app_pipeline(c: &mut Criterion) {
     let mut group = c.benchmark_group("app_pipeline");
@@ -106,7 +91,7 @@ fn bench_app_pipeline(c: &mut Criterion) {
     group.bench_function("single_v5", |b| {
         b.iter(|| {
             let scanner = FakeScanner::from_raw_payloads(vec![v5_data.clone()]);
-            let options = default_options();
+            let options = Options::default();
             let mut out = Vec::<u8>::with_capacity(512);
             let mut err = Vec::<u8>::new();
 
@@ -131,7 +116,7 @@ fn bench_app_pipeline(c: &mut Criterion) {
     group.bench_function("single_v6", |b| {
         b.iter(|| {
             let scanner = FakeScanner::from_raw_payloads(vec![v6_data.clone()]);
-            let options = default_options();
+            let options = Options::default();
             let mut out = Vec::<u8>::with_capacity(512);
             let mut err = Vec::<u8>::new();
 
@@ -171,7 +156,7 @@ fn bench_batch_pipeline(c: &mut Criterion) {
 
                 b.iter(|| {
                     let scanner = FakeScanner::from_raw_payloads(payloads.clone());
-                    let options = default_options();
+                    let options = Options::default();
                     let mut out = Vec::<u8>::with_capacity(512 * size);
                     let mut err = Vec::<u8>::new();
 
@@ -211,8 +196,10 @@ fn bench_throttled_pipeline(c: &mut Criterion) {
     group.bench_function("100_same_mac_throttled", |b| {
         b.iter(|| {
             let scanner = FakeScanner::from_raw_payloads(payloads.clone());
-            let mut options = default_options();
-            options.throttle = Some(std::time::Duration::from_secs(3600));
+            let options = Options {
+                throttle: Some(std::time::Duration::from_secs(3600)),
+                ..Default::default()
+            };
 
             let mut out = Vec::<u8>::with_capacity(512);
             let mut err = Vec::<u8>::new();
@@ -257,7 +244,7 @@ fn bench_multi_device_pipeline(c: &mut Criterion) {
     group.bench_function("10_different_devices", |b| {
         b.iter(|| {
             let scanner = FakeScanner::new(measurements.clone());
-            let options = default_options();
+            let options = Options::default();
             let mut out = Vec::<u8>::with_capacity(512 * 10);
             let mut err = Vec::<u8>::new();
 
