@@ -191,7 +191,9 @@ impl OutputFormatter for InfluxDbFormatter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{TEST_MAC, base_measurement};
+    use crate::test_utils::{
+        TEST_MAC, base_measurement, full_measurement_extremes, test_timestamp,
+    };
 
     fn assert_contains_all(haystack: &str, needles: &[&str]) {
         for needle in needles {
@@ -391,29 +393,6 @@ mod tests {
         assert!(result.starts_with("ruuvi\\ tag\\,\\ v2"));
     }
 
-    fn full_measurement() -> Measurement {
-        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_nanos(1_546_681_655_691_300_729);
-        let mut measurement = base_measurement(TEST_MAC, timestamp);
-        measurement.temperature = Some(19.63);
-        measurement.humidity = Some(19.5);
-        measurement.pressure = Some(101481.0);
-        measurement.battery = Some(3.007);
-        measurement.tx_power = Some(-128);
-        measurement.rssi = Some(127);
-        measurement.movement_counter = Some(4294967295);
-        measurement.measurement_sequence = Some(1234);
-        measurement.acceleration = Some((-0.055, -0.032, 0.998));
-        measurement.pm1_0 = Some(5.5);
-        measurement.pm2_5 = Some(12.5);
-        measurement.pm4_0 = Some(8.2);
-        measurement.pm10_0 = Some(15.1);
-        measurement.co2 = Some(420.0);
-        measurement.voc_index = Some(123.0);
-        measurement.nox_index = Some(45.0);
-        measurement.luminosity = Some(10.0);
-        measurement
-    }
-
     // Exact lines pin what the assertions above skim over: field order,
     // separators, and the rendering of every value (including pm1_0, pm4_0
     // and pm10_0).
@@ -421,7 +400,7 @@ mod tests {
     #[test]
     fn test_influxdb_formatter_exact_line() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string());
-        let result = formatter.format(&full_measurement(), "Sauna");
+        let result = formatter.format(&full_measurement_extremes(), "Sauna");
 
         assert_eq!(
             result,
@@ -437,8 +416,7 @@ mod tests {
     #[test]
     fn test_influxdb_formatter_exact_line_acceleration_only() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string());
-        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_nanos(1_546_681_655_691_300_729);
-        let mut measurement = base_measurement(TEST_MAC, timestamp);
+        let mut measurement = base_measurement(TEST_MAC, test_timestamp());
         measurement.acceleration = Some((0.01, -0.02, 1.0));
 
         assert_eq!(
@@ -451,8 +429,7 @@ mod tests {
     #[test]
     fn test_influxdb_formatter_exact_line_without_fields() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string());
-        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_nanos(1_546_681_655_691_300_729);
-        let measurement = base_measurement(TEST_MAC, timestamp);
+        let measurement = base_measurement(TEST_MAC, test_timestamp());
 
         // An empty field set leaves the space separator and the space before
         // the timestamp back to back. Pinned as-is.

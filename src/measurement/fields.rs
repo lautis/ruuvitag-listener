@@ -98,3 +98,26 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     scalar("nox_index", |m| m.nox_index.map(Field::F64)),
     scalar("luminosity", |m| m.luminosity.map(Field::F64)),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::FIELDS;
+    use crate::test_utils::full_measurement;
+
+    /// The shared test fixture is what makes the formatters' exact-output
+    /// assertions cover every field, so a new `FIELDS` entry without a
+    /// matching fixture value has to fail here rather than quietly drop out of
+    /// those assertions.
+    #[test]
+    fn full_measurement_populates_every_schema_field() {
+        let m = full_measurement();
+        for spec in FIELDS {
+            assert!(
+                (spec.get)(&m).is_some(),
+                "the shared test fixture leaves `{}` empty, so the exact-output \
+                 tests do not cover it",
+                spec.name
+            );
+        }
+    }
+}

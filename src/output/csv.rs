@@ -86,36 +86,7 @@ impl OutputFormatter for CsvFormatter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{TEST_MAC, base_measurement};
-    use std::time::Duration;
-
-    fn test_timestamp() -> std::time::SystemTime {
-        std::time::SystemTime::UNIX_EPOCH
-            + Duration::from_secs(1_546_681_655)
-            + Duration::from_nanos(691_300_729)
-    }
-
-    fn full_v5_measurement() -> Measurement {
-        let mut m = base_measurement(TEST_MAC, test_timestamp());
-        m.temperature = Some(19.63);
-        m.humidity = Some(19.5);
-        m.pressure = Some(101481.0);
-        m.battery = Some(3.007);
-        m.tx_power = Some(-4);
-        m.rssi = Some(-63);
-        m.movement_counter = Some(42);
-        m.measurement_sequence = Some(1234);
-        m.acceleration = Some((-0.055, -0.032, 0.998));
-        m.pm1_0 = Some(5.5);
-        m.pm2_5 = Some(12.5);
-        m.pm4_0 = Some(8.2);
-        m.pm10_0 = Some(15.1);
-        m.co2 = Some(420.0);
-        m.voc_index = Some(123.0);
-        m.nox_index = Some(45.0);
-        m.luminosity = Some(10.0);
-        m
-    }
+    use crate::test_utils::{TEST_MAC, base_measurement, full_measurement, test_timestamp};
 
     #[test]
     fn test_csv_header_lists_all_columns() {
@@ -156,7 +127,7 @@ mod tests {
     #[test]
     fn test_csv_formatter_basic() {
         let formatter = CsvFormatter::new();
-        let m = full_v5_measurement();
+        let m = full_measurement();
         let row = formatter.format(&m, &TEST_MAC.to_string());
         let fields: Vec<&str> = row.split(',').collect();
 
