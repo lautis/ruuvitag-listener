@@ -85,9 +85,10 @@ impl HciSocket {
 
     /// Dispatch a command and return its status and reply event.
     ///
-    /// A rejection arrives as a Command Status rather than a Command Complete,
-    /// and is the final word, so the status comes back the same way with no
-    /// event. [`Self::command_checked`] rejects a non-zero status instead.
+    /// A rejection arrives either as a Command Status — whose status is the
+    /// final word, so no event comes with it — or as a Command Complete
+    /// carrying a non-zero status. [`Self::command_checked`] rejects a
+    /// non-zero status either way.
     fn command(&self, ogf: u16, ocf: u16, params: &[u8]) -> Result<(u8, Vec<u8>), ScanError> {
         let packet = hci_command_packet(ogf, ocf, params);
         send_hci_command(&self.fd, &packet)?;
@@ -341,14 +342,14 @@ fn parse_command_reply(buf: &[u8], expected_opcode: u16) -> Option<CommandReply>
         {
             Some(CommandReply::Complete(buf.to_vec()))
         }
-        // Command Status: [1]=event, [2]=plen, [3]=num cmds, [4]=status,
+        // Command Status: [1]=event, [2]=plen, [3]=status, [4]=num cmds,
         // [5..7]=opcode (LE).
         Some(&EVT_CMD_STATUS)
             if buf.len() >= 7
                 && u16::from_le_bytes([buf[5], buf[6]]) == expected_opcode
-                && buf[4] != 0 =>
+                && buf[3] != 0 =>
         {
-            Some(CommandReply::Failed(buf[4]))
+            Some(CommandReply::Failed(buf[3]))
         }
         _ => None,
     }
@@ -809,21 +810,29 @@ mod tests {
         );
 
         // A Command Status with a failure is the final word — the shape an
-        // Intel AX210 rejects this command in.
+        // Intel AX210 rejects this command in (status 0x01, ncmd 1). The
+        // status is byte 3, the byte before ncmd.
+        assert_eq!(
+            parse_command_reply(&[0x04, 0x0F, 0x04, 0x01, 0x01, 0x0D, 0x20], 0x200d),
+            Some(CommandReply::Failed(HCI_ERR_UNKNOWN_COMMAND))
+        );
+
+        // The status is read from its own byte: "Command Disallowed" (0x0c)
+        // with the same ncmd byte still reports 0x0c, not the ncmd value.
         assert_eq!(
             parse_command_reply(&[0x04, 0x0F, 0x04, 0x0C, 0x01, 0x0D, 0x20], 0x200d),
-            Some(CommandReply::Failed(0x01))
+            Some(CommandReply::Failed(HCI_ERR_COMMAND_DISALLOWED))
         );
 
         // Status zero only acknowledges the command; its real reply follows.
         assert_eq!(
-            parse_command_reply(&[0x04, 0x0F, 0x04, 0x0C, 0x00, 0x0D, 0x20], 0x200d),
+            parse_command_reply(&[0x04, 0x0F, 0x04, 0x00, 0x01, 0x0D, 0x20], 0x200d),
             None
         );
 
         // Command Status for another command.
         assert_eq!(
-            parse_command_reply(&[0x04, 0x0F, 0x04, 0x01, 0x0C, 0x03, 0x20], 0x200d),
+            parse_command_reply(&[0x04, 0x0F, 0x04, 0x01, 0x01, 0x03, 0x20], 0x200d),
             None
         );
 
