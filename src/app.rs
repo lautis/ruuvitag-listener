@@ -123,35 +123,92 @@ impl Scanner for RealScanner {
     }
 }
 
-/// Decide whether a V6 frame is redundant given the devices already seen
-/// emitting E1.
+/// "E1 supersedes V6": once a device has emitted E1, drop its V6 frames.
 ///
 /// Data format 6 exists only for Bluetooth 4 compatibility and is a strict
 /// subset of E1. Once a device has produced an E1 advertisement, its V6 frames
 /// carry no additional data, so they are dropped. E1 frames record the device
-/// in `e1_devices`; V3 and V5 are unrelated lineages and are never suppressed.
+/// as an E1 emitter; V3 and V5 are unrelated lineages and are never suppressed.
 ///
-/// Returns `true` if the measurement should be dropped.
-fn is_redundant_v6(e1_devices: &mut HashSet<MacAddress>, measurement: &Measurement) -> bool {
-    match measurement.format {
-        Format::E1 => {
-            e1_devices.insert(measurement.mac);
-            false
+/// The device set grows for the whole run and is never pruned. That is fine:
+/// the set of RuuviTags in BLE range is finite and tiny, and unlike
+/// [`Throttle`]'s interval-keyed timers there is no staleness to reclaim —
+/// membership means "this device speaks E1", which never expires.
+#[derive(Debug, Default)]
+struct SupersedePolicy {
+    /// Devices seen emitting E1.
+    e1_devices: HashSet<MacAddress>,
+}
+
+impl SupersedePolicy {
+    /// Returns `true` if the measurement should be dropped. E1 frames are
+    /// recorded as a side effect, even when a later policy drops them.
+    fn is_redundant(&mut self, measurement: &Measurement) -> bool {
+        match measurement.format {
+            Format::E1 => {
+                self.e1_devices.insert(measurement.mac);
+                false
+            }
+            Format::V6 => self.e1_devices.contains(&measurement.mac),
+            Format::V5 => false,
+            Format::V3 => false,
         }
-        Format::V6 => e1_devices.contains(&measurement.mac),
-        Format::V5 => false,
-        Format::V3 => false,
     }
 }
 
-fn write_measurement(
-    formatter: &dyn OutputFormatter,
-    measurement: &Measurement,
-    name: &str,
-    out: &mut dyn Write,
-) -> io::Result<()> {
-    let line = formatter.format(measurement, name);
-    writeln!(out, "{line}")
+/// The per-measurement processing policies of the run loop, applied in order.
+///
+/// The run loop stays "recv → `handle` → write"; every policy state lives here
+/// so each one is testable without a [`Scanner`] fake.
+struct Pipeline {
+    /// Drop V6 frames from devices that have emitted E1.
+    supersede: SupersedePolicy,
+    /// At most one emitted measurement per device per interval.
+    throttle: Option<Throttle>,
+    /// Device names; unknown devices fall back to their MAC string.
+    aliases: AliasMap,
+    /// Drop measurements from devices without an alias.
+    only_aliased: bool,
+    formatter: Box<dyn OutputFormatter>,
+}
+
+impl Pipeline {
+    fn new(options: &Options, formatter: Box<dyn OutputFormatter>) -> Self {
+        Self {
+            supersede: SupersedePolicy::default(),
+            throttle: options.throttle.map(Throttle::new),
+            aliases: crate::alias::to_map(&options.aliases),
+            only_aliased: options.only_aliased,
+            formatter,
+        }
+    }
+
+    /// Run one measurement through the policies and format it.
+    ///
+    /// Returns the ready-to-write line without its trailing newline, or `None`
+    /// when a policy drops the measurement.
+    ///
+    /// Policy order is load-bearing and matches the run loop this replaced:
+    /// supersede-drop first, then throttle, then the only-aliased filter. The
+    /// throttle runs before the alias filter, so a measurement the alias
+    /// filter drops still counts as emitted for throttling purposes.
+    fn handle(&mut self, measurement: Measurement) -> Option<String> {
+        if self.supersede.is_redundant(&measurement) {
+            return None;
+        }
+        let should_emit = self
+            .throttle
+            .as_mut()
+            .is_none_or(|t| t.should_emit(measurement.mac));
+        if !should_emit {
+            return None;
+        }
+        if self.only_aliased && !crate::alias::has_alias(&measurement.mac, &self.aliases) {
+            return None;
+        }
+        let name = crate::alias::resolve_name(&measurement.mac, &self.aliases);
+        Some(self.formatter.format(&measurement, &name))
+    }
 }
 
 /// Run the core processing loop, writing formatted output to `out` and verbose errors to `err`.
@@ -168,9 +225,12 @@ pub async fn run_with_io(
     err: &mut dyn Write,
     stop: impl Future<Output = ()> + Send,
 ) -> Result<(), RunError> {
-    let aliases: AliasMap = crate::alias::to_map(&options.aliases);
+    // Cloned rather than moved: `options` is still borrowed below (and its
+    // remaining fields feed the ScanConfig).
     let formatter: Box<dyn OutputFormatter> = match options.format {
-        OutputFormat::InfluxDb => Box::new(InfluxDbFormatter::new(options.influxdb_measurement)),
+        OutputFormat::InfluxDb => {
+            Box::new(InfluxDbFormatter::new(options.influxdb_measurement.clone()))
+        }
         OutputFormat::Jsonl => Box::new(JsonLinesFormatter::new()),
         OutputFormat::Csv => Box::new(CsvFormatter::new()),
     };
@@ -178,11 +238,7 @@ pub async fn run_with_io(
         writeln!(out, "{header}")?;
     }
 
-    // Create throttle if interval is specified
-    let mut throttle = options.throttle.map(Throttle::new);
-
-    // Devices seen emitting E1, whose redundant V6 frames we drop.
-    let mut e1_devices: HashSet<MacAddress> = HashSet::new();
+    let mut pipeline = Pipeline::new(&options, formatter);
 
     let mut session = scanner
         .start_scan(ScanConfig {
@@ -206,22 +262,8 @@ pub async fn run_with_io(
             result = session.measurements.recv() => match result {
                 Some(result) => match result {
                     Ok(measurement) => {
-                        if is_redundant_v6(&mut e1_devices, &measurement) {
-                            continue;
-                        }
-
-                        let should_emit = throttle
-                            .as_mut()
-                            .is_none_or(|t: &mut Throttle| t.should_emit(measurement.mac));
-
-                        if should_emit {
-                            let only_aliased = options.only_aliased
-                                && !crate::alias::has_alias(&measurement.mac, &aliases);
-                            if only_aliased {
-                                continue;
-                            }
-                            let name = crate::alias::resolve_name(&measurement.mac, &aliases);
-                            write_measurement(&*formatter, &measurement, &name, out)?;
+                        if let Some(line) = pipeline.handle(measurement) {
+                            writeln!(out, "{line}")?;
                         }
                     }
                     Err(decode_err) => {
@@ -531,41 +573,158 @@ mod tests {
     }
 
     #[test]
-    fn is_redundant_v6_drops_v6_only_after_e1_seen_for_same_device() {
+    fn supersede_policy_drops_v6_only_after_e1_seen_for_same_device() {
         let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
         let other = MacAddress([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
         let ts = SystemTime::UNIX_EPOCH;
-        let mut e1_devices = HashSet::new();
+        let mut supersede = SupersedePolicy::default();
 
         // V6 before any E1 is kept.
-        assert!(!is_redundant_v6(
-            &mut e1_devices,
-            &measurement_with_format(mac, ts, Format::V6)
-        ));
+        assert!(!supersede.is_redundant(&measurement_with_format(mac, ts, Format::V6)));
 
         // E1 is always kept and registers the device.
-        assert!(!is_redundant_v6(
-            &mut e1_devices,
-            &measurement_with_format(mac, ts, Format::E1)
-        ));
+        assert!(!supersede.is_redundant(&measurement_with_format(mac, ts, Format::E1)));
 
         // V6 from that device is now redundant.
-        assert!(is_redundant_v6(
-            &mut e1_devices,
-            &measurement_with_format(mac, ts, Format::V6)
-        ));
+        assert!(supersede.is_redundant(&measurement_with_format(mac, ts, Format::V6)));
 
         // V6 from a different device is unaffected.
-        assert!(!is_redundant_v6(
-            &mut e1_devices,
-            &measurement_with_format(other, ts, Format::V6)
-        ));
+        assert!(!supersede.is_redundant(&measurement_with_format(other, ts, Format::V6)));
 
         // V5 is never suppressed.
-        assert!(!is_redundant_v6(
-            &mut e1_devices,
-            &measurement_with_format(mac, ts, Format::V5)
-        ));
+        assert!(!supersede.is_redundant(&measurement_with_format(mac, ts, Format::V5)));
+
+        // V3 is never suppressed either.
+        assert!(!supersede.is_redundant(&measurement_with_format(mac, ts, Format::V3)));
+    }
+
+    /// A pipeline with JSONL output: exact lines are easy to assert on.
+    fn jsonl_pipeline(options: &Options) -> Pipeline {
+        Pipeline::new(options, Box::new(JsonLinesFormatter::new()))
+    }
+
+    #[test]
+    fn pipeline_resolves_the_alias_name_or_falls_back_to_the_mac() {
+        let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        let other = MacAddress([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        let ts = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let options = Options {
+            aliases: vec![Alias {
+                address: mac,
+                name: "Sauna".to_string(),
+            }],
+            ..Default::default()
+        };
+        let mut pipeline = jsonl_pipeline(&options);
+
+        let line = pipeline
+            .handle(measurement(mac, ts))
+            .expect("aliased measurement is emitted");
+        assert!(line.contains("\"name\":\"Sauna\""), "{line}");
+
+        let line = pipeline
+            .handle(measurement(other, ts))
+            .expect("unaliased measurement is emitted without --only-aliased");
+        assert!(line.contains("\"name\":\"11:22:33:44:55:66\""), "{line}");
+    }
+
+    #[test]
+    fn pipeline_only_aliased_drops_unaliased_devices() {
+        let aliased = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        let unaliased = MacAddress([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        let ts = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let options = Options {
+            aliases: vec![Alias {
+                address: aliased,
+                name: "Sauna".to_string(),
+            }],
+            only_aliased: true,
+            ..Default::default()
+        };
+        let mut pipeline = jsonl_pipeline(&options);
+
+        assert!(pipeline.handle(measurement(aliased, ts)).is_some());
+        assert!(pipeline.handle(measurement(unaliased, ts)).is_none());
+    }
+
+    #[test]
+    fn pipeline_throttle_allows_the_first_measurement_per_device() {
+        let a = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        let b = MacAddress([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        let ts = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let options = Options {
+            throttle: Some(Duration::from_secs(3600)),
+            ..Default::default()
+        };
+        let mut pipeline = jsonl_pipeline(&options);
+
+        // First event per device passes, the repeat inside the interval does
+        // not, and the other device has its own slot.
+        assert!(pipeline.handle(measurement(a, ts)).is_some());
+        assert!(pipeline.handle(measurement(a, ts)).is_none());
+        assert!(pipeline.handle(measurement(b, ts)).is_some());
+    }
+
+    /// Push one measurement of the given format through a pipeline.
+    fn push(pipeline: &mut Pipeline, mac: MacAddress, format: Format) -> Option<String> {
+        let ts = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        pipeline.handle(measurement_with_format(mac, ts, format))
+    }
+
+    #[test]
+    fn pipeline_drops_v6_superseded_by_e1_and_keeps_the_other_formats() {
+        let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        let mut pipeline = jsonl_pipeline(&Options::default());
+
+        assert!(push(&mut pipeline, mac, Format::V6).is_some());
+        assert!(push(&mut pipeline, mac, Format::E1).is_some());
+        assert!(push(&mut pipeline, mac, Format::V6).is_none());
+        assert!(push(&mut pipeline, mac, Format::V5).is_some());
+        assert!(push(&mut pipeline, mac, Format::V3).is_some());
+    }
+
+    #[test]
+    fn throttled_e1_still_registers_the_device_for_supersede() {
+        // The supersede pass runs before the throttle, so an E1 the throttle
+        // drops still marks the device as an E1 emitter. If registration
+        // happened only for frames that get emitted, the final V6 would come
+        // back to life once the throttle interval had passed.
+        let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        let options = Options {
+            throttle: Some(Duration::from_millis(100)),
+            ..Default::default()
+        };
+        let mut pipeline = jsonl_pipeline(&options);
+
+        // The V6 takes the device's throttle slot.
+        assert!(push(&mut pipeline, mac, Format::V6).is_some());
+        // The E1 lands inside the interval: dropped, but it registers.
+        assert!(push(&mut pipeline, mac, Format::E1).is_none());
+        std::thread::sleep(Duration::from_millis(250));
+        // Past the interval the throttle would let a V6 through; only the
+        // registration from the dropped E1 keeps it out.
+        assert!(push(&mut pipeline, mac, Format::V6).is_none());
+    }
+
+    #[test]
+    fn superseded_v6_does_not_take_a_throttle_slot() {
+        // The other half of the ordering: a redundant V6 is dropped before the
+        // throttle sees it, so it cannot refresh the device's timer. If it
+        // did, the follow-up E1 would land inside the refreshed interval and
+        // be dropped.
+        let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        let options = Options {
+            throttle: Some(Duration::from_millis(100)),
+            ..Default::default()
+        };
+        let mut pipeline = jsonl_pipeline(&options);
+
+        assert!(push(&mut pipeline, mac, Format::E1).is_some());
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(push(&mut pipeline, mac, Format::V6).is_none());
+        // Immediately after the dropped V6: the timer still dates from the
+        // E1, so the interval has long passed.
+        assert!(push(&mut pipeline, mac, Format::E1).is_some());
     }
 
     #[tokio::test]
