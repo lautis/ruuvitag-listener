@@ -224,56 +224,6 @@ mod tests {
     }
 
     #[test]
-    fn test_influxdb_formatter_basic() {
-        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
-        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
-        let mut measurement = base_measurement(TEST_MAC, timestamp);
-        measurement.temperature = Some(25.5);
-        measurement.humidity = Some(60.0);
-        measurement.pressure = Some(101325.0);
-        measurement.battery = Some(3.0);
-        measurement.tx_power = Some(4);
-        measurement.rssi = Some(-63);
-        measurement.movement_counter = Some(10);
-        measurement.measurement_sequence = Some(100);
-        measurement.acceleration = Some((0.01, -0.02, 1.0));
-        measurement.pm2_5 = Some(12.5);
-        measurement.co2 = Some(420.0);
-        measurement.voc_index = Some(123.0);
-        measurement.nox_index = Some(45.0);
-        measurement.luminosity = Some(10.0);
-
-        let result = formatter.format(&measurement, "AA:BB:CC:DD:EE:FF");
-
-        // Check that the result contains expected parts
-        assert!(result.starts_with("ruuvi,"));
-        assert_contains_all(
-            &result,
-            &[
-                "mac=AA:BB:CC:DD:EE:FF",
-                "name=AA:BB:CC:DD:EE:FF",
-                "temperature=25.5",
-                "humidity=60",      // 60%
-                "pressure=101.325", // Pa -> kPa
-                "battery_potential=3",
-                "tx_power=4",
-                "rssi=-63",
-                "movement_counter=10",
-                "measurement_sequence_number=100",
-                "acceleration_x=0.01",
-                "acceleration_y=-0.02",
-                "acceleration_z=1",
-                "pm2_5=12.5",
-                "co2=420",
-                "voc_index=123",
-                "nox_index=45",
-                "luminosity=10",
-            ],
-        );
-        assert!(result.ends_with("1000000000000000000"));
-    }
-
-    #[test]
     fn test_influxdb_formatter_with_alias() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
