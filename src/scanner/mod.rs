@@ -210,7 +210,9 @@ impl Default for Backend {
 pub enum ScanExitBehavior {
     /// Stop the scan on exit only if this process started it (default). A scan
     /// that was already running is left to its original owner, with the
-    /// duplicate-filtering policy it had.
+    /// duplicate-filtering policy it had. A scan whose start state cannot be
+    /// read is left running too: stopping it could kill another process's
+    /// scan.
     #[default]
     OwnedOnly,
     /// Always stop the scan on exit, even if another process started it. The

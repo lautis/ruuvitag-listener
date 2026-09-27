@@ -23,6 +23,7 @@ const OCF_LE_SET_EXTENDED_SCAN_PARAMETERS: u16 = 0x0041;
 const OCF_LE_SET_EXTENDED_SCAN_ENABLE: u16 = 0x0042;
 
 // HCI error codes
+const HCI_ERR_UNKNOWN_COMMAND: u8 = 0x01;
 const HCI_ERR_COMMAND_DISALLOWED: u8 = 0x0c;
 
 // LE feature bits (from LE Read Local Supported Features)
@@ -38,10 +39,12 @@ const LE_SCAN_PASSIVE: u8 = 0x00;
 const LE_PUBLIC_ADDRESS: u8 = 0x00;
 const FILTER_POLICY_ACCEPT_ALL: u8 = 0x00;
 
-// The event the command socket must receive to read back command results
+// The events the command socket must receive to read back command results
 const EVT_CMD_COMPLETE: u8 = 0x0E;
+const EVT_CMD_STATUS: u8 = 0x0F;
 
-// How long to wait for an HCI command's Command Complete event
+// How long to wait for a command's reply (Command Complete or a failing
+// Command Status)
 const COMMAND_TIMEOUT_MS: u64 = 1000;
 
 /// LE scan interval and window: 200 ms in 0.625 ms units (0x140 = 320 ticks).
@@ -74,40 +77,40 @@ impl HciSocket {
         set_hci_filter(&self.fd)
     }
 
-    /// Restrict kernel-delivered packets to Command Complete events.
+    /// Restrict kernel-delivered packets to command replies: Command
+    /// Complete and Command Status events.
     pub(crate) fn set_command_filter(&self) -> Result<(), ScanError> {
         set_command_hci_filter(&self.fd)
     }
 
-    /// Dispatch an HCI command and return its Command Complete status and event.
+    /// Dispatch a command and return its status and reply event.
     ///
-    /// Unlike [`Self::command_checked`], this does not treat a non-zero status
-    /// as an error, so callers can decide which status codes are acceptable.
+    /// A rejection arrives as a Command Status rather than a Command Complete,
+    /// and is the final word, so the status comes back the same way with no
+    /// event. [`Self::command_checked`] rejects a non-zero status instead.
     fn command(&self, ogf: u16, ocf: u16, params: &[u8]) -> Result<(u8, Vec<u8>), ScanError> {
         let packet = hci_command_packet(ogf, ocf, params);
         send_hci_command(&self.fd, &packet)?;
 
-        let event = read_command_complete(&self.fd, hci_opcode(ogf, ocf))?;
-
-        // Status is the first return parameter, at byte 6.
-        let status = *event.get(6).ok_or_else(|| {
-            ScanError::Bluetooth("Truncated HCI Command Complete event".to_string())
-        })?;
-        Ok((status, event))
+        match read_command_reply(&self.fd, hci_opcode(ogf, ocf))? {
+            CommandReply::Complete(event) => {
+                // Status is the first return parameter, at byte 6.
+                let status = *event.get(6).ok_or_else(|| {
+                    ScanError::Bluetooth("Truncated HCI Command Complete event".to_string())
+                })?;
+                Ok((status, event))
+            }
+            CommandReply::Failed(status) => Ok((status, Vec::new())),
+        }
     }
 
-    /// Send an HCI command and verify its Command Complete status is success.
-    ///
-    /// Returns the full Command Complete event so callers can read additional
-    /// return parameters. Surfacing a non-zero status here turns what used to be a
-    /// silent "no events ever arrive" failure into an explicit error.
+    /// Send a command and fail on a non-zero status, returning the Command
+    /// Complete event for any return parameters.
     fn command_checked(&self, ogf: u16, ocf: u16, params: &[u8]) -> Result<Vec<u8>, ScanError> {
         let opcode = hci_opcode(ogf, ocf);
         let (status, event) = self.command(ogf, ocf, params)?;
         if status != 0 {
-            return Err(ScanError::Bluetooth(format!(
-                "HCI command {opcode:#06x} failed with status {status:#04x}"
-            )));
+            return Err(command_status_error(opcode, status));
         }
         Ok(event)
     }
@@ -184,6 +187,13 @@ fn ffi_err(action: &str) -> ScanError {
     ScanError::Bluetooth(format!("{action}: {}", io::Error::last_os_error()))
 }
 
+/// Build the error for a command the controller rejected with `status`.
+fn command_status_error(opcode: u16, status: u8) -> ScanError {
+    ScanError::Bluetooth(format!(
+        "HCI command {opcode:#06x} failed with status {status:#04x}"
+    ))
+}
+
 /// Open a raw HCI socket
 fn open_hci_socket() -> Result<OwnedFd, ScanError> {
     // Create a raw Bluetooth HCI socket using libc directly
@@ -227,39 +237,32 @@ fn bind_hci_socket(fd: &OwnedFd, dev_id: u16) -> Result<(), ScanError> {
     Ok(())
 }
 
-/// Set HCI socket filter for kernel-level packet filtering.
-///
-/// This is the first layer of kernel-level filtering. It configures the HCI
-/// subsystem to only deliver LE Meta Events to userspace, dropping:
-/// - HCI command packets
-/// - ACL data packets
-/// - SCO audio packets
-/// - All other HCI events (connection, disconnection, encryption, etc.)
-///
-/// This significantly reduces CPU wakeups since the kernel discards irrelevant
-/// packets before any userspace context switch or memory copy occurs.
-///
-/// Note: HCI_FILTER cannot filter by LE subevent type, so we still receive
-/// all LE Meta Events (connection complete, advertising reports, etc.).
-/// The BPF filter (set_bpf_ruuvi_filter) provides finer-grained filtering.
+/// Keep the event socket to LE Meta Events, so the kernel drops everything
+/// else before userspace wakes for it. HCI_FILTER cannot select LE subevents,
+/// so the BPF filter in `bpf` narrows it down to Ruuvi advertisements.
 fn set_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
     let mut filter = HciFilter::new();
-    filter.set_ptype(HCI_EVENT_PKT); // Only HCI event packets (0x04)
-    filter.set_event(EVT_LE_META_EVENT); // Only LE Meta Events (0x3E)
+    filter.set_ptype(HCI_EVENT_PKT);
+    filter.set_event(EVT_LE_META_EVENT);
     apply_hci_filter(fd, &filter)
 }
 
-/// Set an HCI filter that only lets Command Complete events through.
-///
-/// The command socket needs this so we can read back the controller's response
-/// to setup commands (feature query, scan enable). A freshly opened HCI raw
-/// socket has an all-zero filter that drops *every* packet, so without this the
-/// command responses would never reach userspace.
-fn set_command_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
+/// Event packets only, and among those the two events a command's reply can
+/// arrive as: a controller that rejects a command outright may answer with
+/// either (an Intel AX210 rejects `LE Read Scan Enable` with a Command
+/// Status).
+fn command_reply_filter() -> HciFilter {
     let mut filter = HciFilter::new();
     filter.set_ptype(HCI_EVENT_PKT);
     filter.set_event(EVT_CMD_COMPLETE);
-    apply_hci_filter(fd, &filter)
+    filter.set_event(EVT_CMD_STATUS);
+    filter
+}
+
+/// Apply the command reply filter. A freshly opened HCI raw socket drops
+/// every packet, so without a filter the replies never reach userspace.
+fn set_command_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
+    apply_hci_filter(fd, &command_reply_filter())
 }
 
 /// Apply an [`HciFilter`] to a socket via `setsockopt(SOL_HCI, HCI_FILTER)`.
@@ -309,12 +312,53 @@ pub(crate) fn read_packet(fd: &impl AsRawFd, buf: &mut [u8]) -> io::Result<usize
     }
 }
 
-/// Wait for the Command Complete event matching `expected_opcode`.
+/// A controller's reply to a command sent on the command socket.
+#[derive(Debug, PartialEq)]
+enum CommandReply {
+    /// The Command Complete event for the command, carrying its status and
+    /// return parameters.
+    Complete(Vec<u8>),
+    /// A Command Status carrying a failure for the command, as the HCI
+    /// status it reported. No Command Complete follows a failing status,
+    /// so this is the controller's final word on the command.
+    Failed(u8),
+}
+
+/// Classify a received packet against the command being waited on.
 ///
-/// The command socket is non-blocking, so we `poll(2)` for readiness and read
-/// events until the one for our command arrives (or we time out). Unrelated
-/// Command Complete events from other openers of the controller are skipped.
-fn read_command_complete(fd: &OwnedFd, expected_opcode: u16) -> Result<Vec<u8>, ScanError> {
+/// Returns `None` for packets to skip while waiting: replies to other
+/// commands, anything that is not an event packet, and a Command Status with
+/// status zero — that one only acknowledges the command.
+fn parse_command_reply(buf: &[u8], expected_opcode: u16) -> Option<CommandReply> {
+    if buf.first() != Some(&HCI_EVENT_PKT) {
+        return None;
+    }
+    match buf.get(1) {
+        // Command Complete: [1]=event, [2]=plen, [3]=num cmds, [4..6]=opcode
+        // (LE), [6..]=return params (status first).
+        Some(&EVT_CMD_COMPLETE)
+            if buf.len() >= 6 && u16::from_le_bytes([buf[4], buf[5]]) == expected_opcode =>
+        {
+            Some(CommandReply::Complete(buf.to_vec()))
+        }
+        // Command Status: [1]=event, [2]=plen, [3]=num cmds, [4]=status,
+        // [5..7]=opcode (LE).
+        Some(&EVT_CMD_STATUS)
+            if buf.len() >= 7
+                && u16::from_le_bytes([buf[5], buf[6]]) == expected_opcode
+                && buf[4] != 0 =>
+        {
+            Some(CommandReply::Failed(buf[4]))
+        }
+        _ => None,
+    }
+}
+
+/// Wait for the controller's reply to the command with `expected_opcode`.
+///
+/// The socket is non-blocking, so we `poll(2)` and read until the reply
+/// arrives or the deadline passes; mismatching events are skipped.
+fn read_command_reply(fd: &OwnedFd, expected_opcode: u16) -> Result<CommandReply, ScanError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(COMMAND_TIMEOUT_MS);
     let mut buf = [0u8; HCI_EVENT_BUF_SIZE];
 
@@ -355,23 +399,13 @@ fn read_command_complete(fd: &OwnedFd, expected_opcode: u16) -> Result<Vec<u8>, 
         }
 
         let n = n as usize;
-        // Command Complete: [0]=pkt type, [1]=event, [2]=plen, [3]=num cmds,
-        // [4..6]=opcode (LE), [6..]=return params (status first).
-        if n >= 6 && buf[0] == HCI_EVENT_PKT && buf[1] == EVT_CMD_COMPLETE {
-            let opcode = u16::from_le_bytes([buf[4], buf[5]]);
-            if opcode == expected_opcode {
-                return Ok(buf[..n].to_vec());
-            }
+        if let Some(reply) = parse_command_reply(&buf[..n], expected_opcode) {
+            return Ok(reply);
         }
     }
 }
 
 /// Query whether the controller supports LE Extended Advertising.
-///
-/// Reads the LE features bitmap and checks the Extended Advertising bit. A
-/// Bluetooth 5 controller (e.g. Intel AX210) reports advertisements via
-/// Extended Advertising Reports once extended scanning is enabled, so we must
-/// drive it with the extended scan commands instead of the legacy ones.
 fn controller_supports_extended_scan(fd: &HciSocket) -> Result<bool, ScanError> {
     let event = fd.command_checked(OGF_LE_CTL, OCF_LE_READ_LOCAL_SUPPORTED_FEATURES, &[])?;
 
@@ -383,12 +417,10 @@ fn controller_supports_extended_scan(fd: &HciSocket) -> Result<bool, ScanError> 
     }
 }
 
-/// The controller's LE scan state, as reported by `LE Read Scan Enable`.
-///
-/// This is the only scan configuration the spec lets us read back, which is
-/// why it is worth keeping both fields: the caller needs to know whether a
-/// scan is running to decide ownership, and the duplicate policy to put back
-/// when leaving someone else's scan running.
+/// The controller's LE scan state, as reported by `LE Read Scan Enable` — the
+/// only scan configuration the spec lets us read back, which is why both
+/// fields are kept: whether a scan is running decides ownership, and the
+/// duplicate policy is what to restore on the way out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ScanState {
     /// Whether the controller is actively scanning.
@@ -399,9 +431,9 @@ pub(crate) struct ScanState {
 
 /// Parse an `LE Read Scan Enable` Command Complete response.
 ///
-/// The status byte (6) is known to be success by the caller; byte 7 carries
+/// The caller has already checked the status byte (6); byte 7 is
 /// LE_Scan_Enable and byte 8 Filter_Duplicates. A response too short to hold
-/// a field reads as "off" for that field.
+/// a field reads as off for that field.
 fn scan_state(event: &[u8]) -> ScanState {
     ScanState {
         enabled: event.get(7).copied() == Some(HCI_SCAN_ENABLED),
@@ -409,17 +441,42 @@ fn scan_state(event: &[u8]) -> ScanState {
     }
 }
 
+/// The outcome of asking a controller for its LE scan state.
+#[derive(Debug)]
+pub(crate) enum ScanStateOutcome {
+    /// The controller reported its state.
+    Known(ScanState),
+    /// The controller does not implement `LE Read Scan Enable`, so it cannot
+    /// say whether a scan was already running. Some firmwares (e.g. Intel
+    /// AX210) report this instead of a state.
+    Unreported,
+    /// The query failed (e.g. a timeout), so the state is unknown.
+    Failed(ScanError),
+}
+
 /// Read the controller's current LE scan state.
 ///
-/// The `HCI_LE_Read_Scan_Enable` command (opcode 0x200D) reports the
-/// controller's current scan state regardless of which process started the
-/// scan, which is what tells the caller whether *it* is the scan's owner.
-///
-/// A failure here is not fatal: the caller falls back to assuming the
-/// controller was idle, so the scan it starts is treated as its own.
-pub(crate) fn le_scan_state(fd: &HciSocket) -> Result<ScanState, ScanError> {
-    let event = fd.command_checked(OGF_LE_CTL, OCF_LE_READ_SCAN_ENABLE, &[])?;
-    Ok(scan_state(&event))
+/// The answer is global — it says nothing about who started the scan — which
+/// is what lets the caller tell its own scan from someone else's. A controller
+/// that does not implement the command reports [`ScanStateOutcome::Unreported`].
+pub(crate) fn le_scan_state(fd: &HciSocket) -> ScanStateOutcome {
+    scan_state_outcome(fd.command(OGF_LE_CTL, OCF_LE_READ_SCAN_ENABLE, &[]))
+}
+
+/// Translate the reply to `LE Read Scan Enable` into an outcome.
+fn scan_state_outcome(reply: Result<(u8, Vec<u8>), ScanError>) -> ScanStateOutcome {
+    match reply {
+        Ok((0, event)) => ScanStateOutcome::Known(scan_state(&event)),
+        // Either reply shape can carry the status. Only "Unknown HCI Command"
+        // means unimplemented; "Unsupported Feature or Parameter" (0x11) lands
+        // in `Failed`, which exit treats the same way.
+        Ok((HCI_ERR_UNKNOWN_COMMAND, _)) => ScanStateOutcome::Unreported,
+        Ok((status, _)) => ScanStateOutcome::Failed(command_status_error(
+            hci_opcode(OGF_LE_CTL, OCF_LE_READ_SCAN_ENABLE),
+            status,
+        )),
+        Err(e) => ScanStateOutcome::Failed(e),
+    }
 }
 
 /// Which LE scan command family to use: legacy (Bluetooth 4.x) vs extended
@@ -503,17 +560,12 @@ impl ScanMode {
     }
 }
 
-/// Disable any active scan, set scan parameters, then enable scanning.
+/// Disable, set the scan parameters, enable.
 ///
-/// The initial disable is required because setting scan parameters is rejected
-/// with "Command Disallowed" while a scan is active (e.g. bluetoothd is running
-/// a discovery). Disabling an already-disabled scan is a no-op that some
-/// controllers reject with "Command Disallowed" (e.g. Broadcom BCM43455); the
-/// disable path tolerates that status (see [`scan_enable_status_ok`]).
-///
-/// Note that attaching to a pre-existing scan replaces its parameters. Only
-/// the duplicate-filtering policy is put back afterwards, by
-/// [`restore_le_scan_duplicates`]; the rest is not readable.
+/// The disable comes first: a controller rejects `LE Set Scan Parameters` with
+/// "Command Disallowed" while a scan is active. Attaching to a pre-existing
+/// scan replaces its parameters, of which only the duplicate policy is
+/// restored afterwards (see [`restore_le_scan_duplicates`]).
 fn configure_scan(fd: &HciSocket, mode: ScanMode) -> Result<(), ScanError> {
     set_scan_enable_with_duplicates(fd, mode, false, false)?;
     let params = mode.set_params_bytes();
@@ -523,13 +575,12 @@ fn configure_scan(fd: &HciSocket, mode: ScanMode) -> Result<(), ScanError> {
 }
 
 /// Enable or disable LE scanning, tolerating "Command Disallowed" when
-/// disabling an already-disabled scan.
+/// disabling an already-disabled scan (see [`scan_enable_status_ok`]).
 ///
-/// `filter_duplicates` picks the controller-side dedup policy, and this
-/// listener asks for `false` on every path except putting someone else's
-/// policy back: RuuviTags re-broadcast largely unchanged payloads, so
-/// controller-side deduplication would discard measurements we still want to
-/// see.
+/// `filter_duplicates` is the controller-side dedup policy. This listener asks
+/// for `false` on every path except restoring someone else's: RuuviTags
+/// re-broadcast much the same payload, so deduplication would discard
+/// measurements it still wants to see.
 fn set_scan_enable_with_duplicates(
     fd: &HciSocket,
     mode: ScanMode,
@@ -540,9 +591,7 @@ fn set_scan_enable_with_duplicates(
     let bytes = mode.enable_bytes(enable, filter_duplicates);
     let (status, _event) = fd.command(OGF_LE_CTL, mode.enable_ocf(), &bytes)?;
     if !scan_enable_status_ok(enable, status) {
-        return Err(ScanError::Bluetooth(format!(
-            "HCI command {opcode:#06x} failed with status {status:#04x}"
-        )));
+        return Err(command_status_error(opcode, status));
     }
     Ok(())
 }
@@ -564,37 +613,38 @@ pub(crate) fn disable_le_scan(fd: &HciSocket, mode: ScanMode) -> Result<(), Scan
     set_scan_enable_with_duplicates(fd, mode, false, false)
 }
 
-/// Put back the duplicate-filtering policy of a scan this process attached to.
+/// Put back the duplicate policy of a scan this process attached to.
 ///
-/// `Filter_Duplicates` is a parameter of LE Set Scan Enable, not of LE Set Scan
-/// Parameters, so restoring it needs no `LE Set Scan Parameters` round trip and
-/// leaves the scan interval, window, own address type and filter policy as
-/// they are. It is also the only piece of the previous configuration that can
-/// be restored: the spec provides no way to read those other parameters back,
-/// so they stay as this process configured them.
+/// `Filter_Duplicates` is a parameter of LE Set Scan Enable, so restoring it
+/// takes one command and leaves everything else as it is — and it is the only
+/// part of the previous configuration that can be restored, the spec offering
+/// no way to read the rest back.
 ///
-/// The re-read is what keeps this from starting a scan nobody wants: whoever
-/// owned the scan may have stopped it while this process was running, and
-/// setting `Filter_Duplicates` means sending `LE Set Scan Enable`, which
-/// re-enables scanning as a side effect. When that has happened there is
-/// nothing to put back, so nothing is sent and the reason is returned as a
-/// warning for the caller to report.
+/// The state is re-read first, because restoring means sending `LE Set Scan
+/// Enable`, which re-enables scanning as a side effect: a scan whose owner has
+/// since stopped it would be restarted for nobody. The scan is also cycled
+/// rather than re-enabled in place, since a redundant enable is rejected with
+/// "Command Disallowed" (see [`scan_enable_status_ok`]) — the cost is a
+/// one-command gap at exit.
 ///
-/// The scan is cycled rather than re-enabled in place. A controller that
-/// rejects a redundant `LE Set Scan Enable` answers `Command Disallowed` (see
-/// [`scan_enable_status_ok`]), which this path cannot tolerate, so the disable
-/// is issued first — it is already tolerated as a no-op — and the re-enable is
-/// the same command [`configure_scan`] issues successfully at startup. The
-/// cost is a scan gap of one command round trip, at process exit.
-///
-/// Returns the non-fatal warning to report, if there is one. Callers own
-/// warning delivery, so this stays free of any channel or runtime type.
+/// Returns the non-fatal warning to report, if any.
 pub(crate) fn restore_le_scan_duplicates(
     fd: &HciSocket,
     mode: ScanMode,
     filter_duplicates: bool,
 ) -> Result<Option<String>, ScanError> {
-    if !le_scan_state(fd)?.enabled {
+    let scan_running = match le_scan_state(fd) {
+        ScanStateOutcome::Known(state) => state.enabled,
+        // Unreachable: a policy to restore was read at startup, so the
+        // controller reports its state. Nothing safe to restore if it stops.
+        ScanStateOutcome::Unreported => {
+            return Ok(Some(
+                "cannot re-read the LE scan state; not restoring its duplicate policy".to_string(),
+            ));
+        }
+        ScanStateOutcome::Failed(e) => return Err(e),
+    };
+    if !scan_running {
         return Ok(Some(
             "LE scan stopped while we ran; not restoring its duplicate policy".to_string(),
         ));
@@ -604,12 +654,9 @@ pub(crate) fn restore_le_scan_duplicates(
     Ok(None)
 }
 
-/// Whether a returned status is acceptable for an LE scan enable/disable
-/// command.
-///
-/// Disabling an already-disabled scan is a no-op that some controllers reject
-/// with `Command Disallowed` (e.g. Broadcom BCM43455), so that status is
-/// tolerated when disabling.
+/// Whether a returned status is acceptable for an LE scan enable/disable:
+/// disabling an already-disabled scan is a no-op that some controllers reject
+/// with `Command Disallowed` (e.g. Broadcom BCM43455).
 fn scan_enable_status_ok(enable: bool, status: u8) -> bool {
     status == 0 || (!enable && status == HCI_ERR_COMMAND_DISALLOWED)
 }
@@ -624,10 +671,7 @@ mod tests {
         filter.set_ptype(HCI_EVENT_PKT);
         filter.set_event(EVT_LE_META_EVENT);
 
-        // Verify filter is set correctly
-        // HCI_EVENT_PKT (0x04) sets bit 4 in type_mask
         assert_eq!(filter.type_mask, 1 << HCI_EVENT_PKT);
-        // EVT_LE_META_EVENT (0x3E = 62) sets bit 30 in event_mask[1]
         assert_eq!(filter.event_mask[1], 1 << (EVT_LE_META_EVENT % 32));
     }
 
@@ -640,14 +684,11 @@ mod tests {
 
     #[test]
     fn test_scan_enable_status_ok() {
-        // Success is always acceptable.
         assert!(scan_enable_status_ok(true, 0x00));
         assert!(scan_enable_status_ok(false, 0x00));
-        // Disabling an already-disabled scan may be rejected with Command Disallowed.
+        // Disabling an already-disabled scan may be rejected.
         assert!(scan_enable_status_ok(false, HCI_ERR_COMMAND_DISALLOWED));
-        // Enabling must always succeed.
         assert!(!scan_enable_status_ok(true, HCI_ERR_COMMAND_DISALLOWED));
-        // Other errors are never tolerated.
         assert!(!scan_enable_status_ok(false, 0x0f));
     }
 
@@ -688,7 +729,6 @@ mod tests {
             vec![0x01, 0x01, 0x00, 0x00, 0x00, 0x00]
         );
 
-        // Each mode uses its own command OCFs.
         assert_eq!(
             ScanMode::Legacy.set_params_ocf(),
             OCF_LE_SET_SCAN_PARAMETERS
@@ -708,7 +748,6 @@ mod tests {
     fn test_scan_state_parses_command_complete() {
         // Command Complete for LE Read Scan Enable (opcode 0x200d): status at
         // byte 6, LE_Scan_Enable at byte 7, Filter_Duplicates at byte 8.
-        // Not scanning, duplicates not filtered.
         let disabled = [0x04u8, 0x0E, 0x06, 0x01, 0x0D, 0x20, 0x00, 0x00, 0x00];
         assert_eq!(
             scan_state(&disabled),
@@ -718,7 +757,6 @@ mod tests {
             }
         );
 
-        // Scanning, duplicates still not filtered.
         let enabled = [0x04u8, 0x0E, 0x06, 0x01, 0x0D, 0x20, 0x00, 0x01, 0x00];
         assert_eq!(
             scan_state(&enabled),
@@ -728,7 +766,6 @@ mod tests {
             }
         );
 
-        // The pre-existing owner's duplicate policy, which shutdown restores.
         let filtering = [0x04u8, 0x0E, 0x06, 0x01, 0x0D, 0x20, 0x00, 0x01, 0x01];
         assert_eq!(
             scan_state(&filtering),
@@ -738,8 +775,126 @@ mod tests {
             }
         );
 
-        // A truncated event reads as an idle controller with no filtering,
-        // which is the same fallback the caller uses on a failed query.
+        // A truncated event reads as an idle controller with no filtering.
         assert_eq!(scan_state(&[0x04, 0x0E]), ScanState::default());
+    }
+
+    /// Both reply events have to pass: without the Command Status bit a
+    /// rejection never reaches userspace and every query for one times out.
+    #[test]
+    fn test_command_filter_passes_both_reply_events() {
+        let filter = command_reply_filter();
+        assert_eq!(filter.type_mask, 1 << HCI_EVENT_PKT);
+        assert_eq!(
+            filter.event_mask[0],
+            (1 << (EVT_CMD_COMPLETE % 32)) | (1 << (EVT_CMD_STATUS % 32))
+        );
+    }
+
+    /// Replies are matched by event kind and opcode; everything else is
+    /// skipped while waiting.
+    #[test]
+    fn test_parse_command_reply_matches_only_its_command() {
+        // Command Complete for LE Read Scan Enable (0x200d).
+        let complete = [0x04, 0x0E, 0x06, 0x01, 0x0D, 0x20, 0x00, 0x01, 0x00];
+        assert_eq!(
+            parse_command_reply(&complete, 0x200d),
+            Some(CommandReply::Complete(complete.to_vec()))
+        );
+
+        // Command Complete for another command belongs to its wait, not ours.
+        assert_eq!(
+            parse_command_reply(&[0x04, 0x0E, 0x0C, 0x01, 0x03, 0x20, 0x00], 0x200d),
+            None
+        );
+
+        // A Command Status with a failure is the final word — the shape an
+        // Intel AX210 rejects this command in.
+        assert_eq!(
+            parse_command_reply(&[0x04, 0x0F, 0x04, 0x0C, 0x01, 0x0D, 0x20], 0x200d),
+            Some(CommandReply::Failed(0x01))
+        );
+
+        // Status zero only acknowledges the command; its real reply follows.
+        assert_eq!(
+            parse_command_reply(&[0x04, 0x0F, 0x04, 0x0C, 0x00, 0x0D, 0x20], 0x200d),
+            None
+        );
+
+        // Command Status for another command.
+        assert_eq!(
+            parse_command_reply(&[0x04, 0x0F, 0x04, 0x01, 0x0C, 0x03, 0x20], 0x200d),
+            None
+        );
+
+        // A Command Complete short of its status byte still identifies its
+        // command, so the caller reports the truncation instead of the wait
+        // timing out on a reply already in hand.
+        assert_eq!(
+            parse_command_reply(&[0x04, 0x0E, 0x01, 0x01, 0x0D, 0x20], 0x200d),
+            Some(CommandReply::Complete(vec![
+                0x04, 0x0E, 0x01, 0x01, 0x0D, 0x20
+            ]))
+        );
+
+        // Truncated and non-event packets are not replies.
+        assert_eq!(
+            parse_command_reply(&[0x04, 0x0E, 0x02, 0x01, 0x0D], 0x200d),
+            None
+        );
+        assert_eq!(
+            parse_command_reply(&[0x04, 0x0F, 0x04, 0x0C, 0x01, 0x0D], 0x200d),
+            None
+        );
+        assert_eq!(
+            parse_command_reply(&[0x01, 0x0F, 0x04, 0x0C, 0x01, 0x0D, 0x20], 0x200d),
+            None
+        );
+    }
+
+    /// Reply shapes map to the outcome they mean.
+    #[test]
+    fn test_scan_state_outcome_translations() {
+        let reported = Ok((
+            0x00,
+            vec![0x04, 0x0E, 0x06, 0x01, 0x0D, 0x20, 0x00, 0x01, 0x01],
+        ));
+        assert!(matches!(
+            scan_state_outcome(reported),
+            ScanStateOutcome::Known(ScanState {
+                enabled: true,
+                filter_duplicates: true
+            })
+        ));
+
+        // "Unknown HCI Command" as a Command Status, which carries no event.
+        assert!(matches!(
+            scan_state_outcome(Ok((HCI_ERR_UNKNOWN_COMMAND, Vec::new()))),
+            ScanStateOutcome::Unreported
+        ));
+
+        // The same status in a Command Complete says the same thing.
+        assert!(matches!(
+            scan_state_outcome(Ok((
+                HCI_ERR_UNKNOWN_COMMAND,
+                vec![0x04, 0x0E, 0x04, 0x01, 0x0D, 0x20, 0x01]
+            ))),
+            ScanStateOutcome::Unreported
+        ));
+
+        // Any other status is a failure.
+        match scan_state_outcome(Ok((HCI_ERR_COMMAND_DISALLOWED, Vec::new()))) {
+            ScanStateOutcome::Failed(ScanError::Bluetooth(message)) => {
+                assert!(message.contains("0x200d"), "names the command: {message}");
+                assert!(message.contains("0x0c"), "names the status: {message}");
+            }
+            other => panic!("expected a failed query, got {other:?}"),
+        }
+
+        // A transport error (e.g. a timeout) is a failure too.
+        assert!(matches!(
+            scan_state_outcome(Err(ScanError::Bluetooth("timed out".into()))),
+            ScanStateOutcome::Failed(_)
+        ));
     }
 }

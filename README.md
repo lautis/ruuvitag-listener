@@ -222,6 +222,10 @@ sudo setcap 'cap_net_admin,cap_net_raw+ep' ruuvitag-listener
 getcap ruuvitag-listener  # Verify: should show cap_net_admin,cap_net_raw=ep
 ```
 
+### HCI backend: "could not determine whether the adapter was already scanning"
+
+The listener checks whether an LE scan is already running, so it can leave a scan another process owns alone on exit. Some controllers do not implement the query command (`LE Read Scan Enable`); an Intel AX210, for example, answers it with "Unknown HCI Command". When the scan state cannot be read, the listener cannot tell whether it started the scan itself, so the default `--hci-scan-exit-behavior owned-only` leaves the scan running on exit rather than risk stopping another process's scan. Pass `--hci-scan-exit-behavior always` to stop the scan on exit regardless of who started it.
+
 ### HCI backend: Network is down
 
 If you get "Network is down" errors, the Bluetooth adapter needs to be brought up:
