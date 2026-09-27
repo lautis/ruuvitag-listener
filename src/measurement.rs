@@ -1,5 +1,7 @@
 //! RuuviTag measurement data structure.
 
+pub(crate) mod fields;
+
 use crate::mac_address::MacAddress;
 
 /// The RuuviTag advertisement data format a measurement was decoded from.

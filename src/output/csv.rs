@@ -1,14 +1,13 @@
 //! CSV output formatter.
 
 use crate::measurement::Measurement;
+use crate::measurement::fields::for_each_field;
 use crate::output::{OutputFormatter, format_timestamp_rfc3339};
 use std::fmt::Write;
 
-/// Column names. Field names and units match the InfluxDB line protocol
-/// output and the JSON Lines field names.
-const HEADER: &str = "mac,name,timestamp,format,temperature,humidity,pressure,battery_potential,\
-tx_power,rssi,movement_counter,measurement_sequence_number,acceleration_x,acceleration_y,\
-acceleration_z,pm1_0,pm2_5,pm4_0,pm10_0,co2,voc_index,nox_index,luminosity";
+/// Fixed columns preceding the schema fields. The rest of the header row is
+/// derived from the measurement field schema.
+const COLUMN_PREFIX: &str = "mac,name,timestamp,format";
 
 /// CSV formatter.
 ///
@@ -46,43 +45,18 @@ impl CsvFormatter {
         }
     }
 
-    /// Write measurement values, leaving absent values empty.
+    /// Write measurement values in schema order, leaving absent values empty.
     #[inline]
     fn write_values(buf: &mut String, m: &Measurement) {
-        macro_rules! write_value {
-            ($val:expr) => {
+        macro_rules! value {
+            ($name:literal, $kind:ident, $get:expr) => {
                 buf.push(',');
-                if let Some(v) = $val {
-                    let _ = write!(buf, "{}", v);
+                if let Some(v) = ($get)(m) {
+                    let _ = write!(buf, "{v}");
                 }
             };
         }
-
-        write_value!(m.temperature);
-        write_value!(m.humidity);
-        write_value!(m.pressure.map(|p| p / 1000.0));
-        write_value!(m.battery);
-        write_value!(m.tx_power);
-        write_value!(m.rssi);
-        write_value!(m.movement_counter);
-        write_value!(m.measurement_sequence);
-        if let Some((x, y, z)) = m.acceleration {
-            write_value!(Some(x));
-            write_value!(Some(y));
-            write_value!(Some(z));
-        } else {
-            write_value!(None::<f64>);
-            write_value!(None::<f64>);
-            write_value!(None::<f64>);
-        }
-        write_value!(m.pm1_0);
-        write_value!(m.pm2_5);
-        write_value!(m.pm4_0);
-        write_value!(m.pm10_0);
-        write_value!(m.co2);
-        write_value!(m.voc_index);
-        write_value!(m.nox_index);
-        write_value!(m.luminosity);
+        for_each_field!(value);
     }
 }
 
@@ -104,43 +78,22 @@ impl OutputFormatter for CsvFormatter {
     }
 
     fn header(&self) -> Option<String> {
-        Some(HEADER.to_string())
+        let mut header = String::from(COLUMN_PREFIX);
+        macro_rules! column {
+            ($name:literal, $kind:ident, $get:expr) => {
+                header.push(',');
+                header.push_str($name);
+            };
+        }
+        for_each_field!(column);
+        Some(header)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{TEST_MAC, base_measurement};
-    use std::time::Duration;
-
-    fn test_timestamp() -> std::time::SystemTime {
-        std::time::SystemTime::UNIX_EPOCH
-            + Duration::from_secs(1_546_681_655)
-            + Duration::from_nanos(691_300_729)
-    }
-
-    fn full_v5_measurement() -> Measurement {
-        let mut m = base_measurement(TEST_MAC, test_timestamp());
-        m.temperature = Some(19.63);
-        m.humidity = Some(19.5);
-        m.pressure = Some(101481.0);
-        m.battery = Some(3.007);
-        m.tx_power = Some(-4);
-        m.rssi = Some(-63);
-        m.movement_counter = Some(42);
-        m.measurement_sequence = Some(1234);
-        m.acceleration = Some((-0.055, -0.032, 0.998));
-        m.pm1_0 = Some(5.5);
-        m.pm2_5 = Some(12.5);
-        m.pm4_0 = Some(8.2);
-        m.pm10_0 = Some(15.1);
-        m.co2 = Some(420.0);
-        m.voc_index = Some(123.0);
-        m.nox_index = Some(45.0);
-        m.luminosity = Some(10.0);
-        m
-    }
+    use crate::test_utils::{TEST_MAC, base_measurement, full_measurement, test_timestamp};
 
     #[test]
     fn test_csv_header_lists_all_columns() {
@@ -181,7 +134,7 @@ mod tests {
     #[test]
     fn test_csv_formatter_basic() {
         let formatter = CsvFormatter::new();
-        let m = full_v5_measurement();
+        let m = full_measurement();
         let row = formatter.format(&m, &TEST_MAC.to_string());
         let fields: Vec<&str> = row.split(',').collect();
 
