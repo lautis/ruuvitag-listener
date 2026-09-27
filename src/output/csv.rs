@@ -1,6 +1,7 @@
 //! CSV output formatter.
 
-use crate::measurement::{Measurement, fields};
+use crate::measurement::Measurement;
+use crate::measurement::fields::for_each_field;
 use crate::output::{OutputFormatter, format_timestamp_rfc3339};
 use std::fmt::Write;
 
@@ -47,12 +48,15 @@ impl CsvFormatter {
     /// Write measurement values in schema order, leaving absent values empty.
     #[inline]
     fn write_values(buf: &mut String, m: &Measurement) {
-        for spec in fields::FIELDS {
-            buf.push(',');
-            if let Some(v) = (spec.get)(m) {
-                let _ = write!(buf, "{v}");
-            }
+        macro_rules! value {
+            ($name:literal, $kind:ident, $get:expr) => {
+                buf.push(',');
+                if let Some(v) = ($get)(m) {
+                    let _ = write!(buf, "{v}");
+                }
+            };
         }
+        for_each_field!(value);
     }
 }
 
@@ -75,10 +79,13 @@ impl OutputFormatter for CsvFormatter {
 
     fn header(&self) -> Option<String> {
         let mut header = String::from(COLUMN_PREFIX);
-        for spec in fields::FIELDS {
-            header.push(',');
-            header.push_str(spec.name);
+        macro_rules! column {
+            ($name:literal, $kind:ident, $get:expr) => {
+                header.push(',');
+                header.push_str($name);
+            };
         }
+        for_each_field!(column);
         Some(header)
     }
 }

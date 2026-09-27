@@ -1,7 +1,9 @@
 //! InfluxDB line protocol output formatter.
 
-use crate::measurement::{Measurement, fields};
+use crate::measurement::Measurement;
+use crate::measurement::fields::for_each_field;
 use crate::output::OutputFormatter;
+use std::fmt;
 use std::fmt::Write;
 use std::time::SystemTime;
 
@@ -115,29 +117,46 @@ impl InfluxDbFormatter {
         Self::write_tag_value(buf, name);
     }
 
+    /// Write one present field, comma separated.
+    #[inline]
+    fn write_field(buf: &mut String, first: &mut bool, name: &str, v: impl fmt::Display) {
+        if *first {
+            *first = false;
+        } else {
+            buf.push(',');
+        }
+        let _ = write!(buf, "{}={}", name, v);
+    }
+
     /// Write fields directly to the buffer (no intermediate BTreeMap).
     ///
     /// Only writes fields that have values, taking names and order from the
     /// measurement field schema. The acceleration components are written
     /// after the scalar fields: line protocol field order is not semantic and
-    /// this is the line layout this formatter has always emitted.
+    /// this is the line layout this formatter has always emitted. The schema
+    /// list is walked twice, once for each kind, so the components still come
+    /// out last without a second hand-kept list.
     #[inline]
     fn write_fields(buf: &mut String, m: &Measurement) {
         let mut first = true;
-        for spec in fields::FIELDS
-            .iter()
-            .filter(|spec| !spec.vector)
-            .chain(fields::FIELDS.iter().filter(|spec| spec.vector))
-        {
-            if let Some(v) = (spec.get)(m) {
-                if first {
-                    first = false;
-                } else {
-                    buf.push(',');
+        macro_rules! scalar_field {
+            ($name:literal, scalar, $get:expr) => {
+                if let Some(v) = ($get)(m) {
+                    Self::write_field(buf, &mut first, $name, v);
                 }
-                let _ = write!(buf, "{}={}", spec.name, v);
-            }
+            };
+            ($name:literal, vector, $get:expr) => {};
         }
+        macro_rules! vector_field {
+            ($name:literal, scalar, $get:expr) => {};
+            ($name:literal, vector, $get:expr) => {
+                if let Some(v) = ($get)(m) {
+                    Self::write_field(buf, &mut first, $name, v);
+                }
+            };
+        }
+        for_each_field!(scalar_field);
+        for_each_field!(vector_field);
     }
 
     /// Write timestamp as nanoseconds since Unix epoch.

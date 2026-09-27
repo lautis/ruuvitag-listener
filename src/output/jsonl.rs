@@ -1,6 +1,7 @@
 //! JSON Lines output formatter.
 
-use crate::measurement::{Measurement, fields};
+use crate::measurement::Measurement;
+use crate::measurement::fields::for_each_field;
 use crate::output::{OutputFormatter, format_timestamp_rfc3339};
 use std::fmt::Write;
 
@@ -64,15 +65,18 @@ impl JsonLinesFormatter {
     fn write_fields(buf: &mut String, m: &Measurement) {
         // MAC, name, format, and timestamp always precede the fields, so every
         // present field is written with a leading comma.
-        for spec in fields::FIELDS {
-            if let Some(v) = (spec.get)(m) {
-                buf.push(',');
-                buf.push('"');
-                buf.push_str(spec.name);
-                buf.push_str("\":");
-                let _ = write!(buf, "{v}");
-            }
+        macro_rules! field {
+            ($name:literal, $kind:ident, $get:expr) => {
+                if let Some(v) = ($get)(m) {
+                    buf.push(',');
+                    buf.push('"');
+                    buf.push_str($name);
+                    buf.push_str("\":");
+                    let _ = write!(buf, "{v}");
+                }
+            };
         }
+        for_each_field!(field);
     }
 }
 
