@@ -86,11 +86,9 @@ impl HciSocket {
         Ok((status, event))
     }
 
-    /// Send an HCI command and verify its Command Complete status is success.
+    /// Send an HCI command and require a success status.
     ///
-    /// Returns the full Command Complete event so callers can read additional
-    /// return parameters. Surfacing a non-zero status here turns what used to be a
-    /// silent "no events ever arrive" failure into an explicit error.
+    /// Returns the full Command Complete event for reading return parameters.
     fn command_checked(&self, ogf: u16, ocf: u16, params: &[u8]) -> Result<Vec<u8>, ScanError> {
         let opcode = hci_opcode(ogf, ocf);
         let (status, event) = self.command(ogf, ocf, params)?;
@@ -217,21 +215,10 @@ fn bind_hci_socket(fd: &OwnedFd, dev_id: u16) -> Result<(), ScanError> {
     Ok(())
 }
 
-/// Set HCI socket filter for kernel-level packet filtering.
+/// Only deliver LE Meta events to userspace.
 ///
-/// This is the first layer of kernel-level filtering. It configures the HCI
-/// subsystem to only deliver LE Meta Events to userspace, dropping:
-/// - HCI command packets
-/// - ACL data packets
-/// - SCO audio packets
-/// - All other HCI events (connection, disconnection, encryption, etc.)
-///
-/// This significantly reduces CPU wakeups since the kernel discards irrelevant
-/// packets before any userspace context switch or memory copy occurs.
-///
-/// Note: HCI_FILTER cannot filter by LE subevent type, so we still receive
-/// all LE Meta Events (connection complete, advertising reports, etc.).
-/// The BPF filter (set_bpf_ruuvi_filter) provides finer-grained filtering.
+/// `HCI_FILTER` cannot match the LE subevent, so all Meta events still arrive;
+/// BPF drops the non-advertising ones.
 fn set_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
     let mut filter = HciFilter::new();
     filter.set_ptype(HCI_EVENT_PKT); // Only HCI event packets (0x04)

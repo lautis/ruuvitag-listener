@@ -68,9 +68,8 @@ fn resolve_adapter(name: &str) -> Result<u16, ScanError> {
 
 /// Forward every HCI event currently readable on `guard` to `tx`.
 ///
-/// Returns `false` when the receive loop should end for good: a real read
-/// error, or a consumer that has gone away. Running out of buffered packets is
-/// not that — it just means the socket has nothing more for now.
+/// Returns `false` when the receive loop should end: a read error or a
+/// departed consumer. An empty socket buffer just ends the drain.
 async fn drain_events(
     guard: &mut AsyncFdReadyGuard<'_, HciSocket>,
     buf: &mut [u8; HCI_EVENT_BUF_SIZE],
@@ -102,35 +101,13 @@ async fn drain_events(
 
 /// Start scanning for RuuviTag devices using raw HCI sockets.
 ///
-/// This function opens a raw HCI socket, configures LE scanning, and
-/// processes advertising reports. Discovered measurements are sent through the
-/// returned channel. Runs indefinitely until interrupted.
+/// Opens event and command sockets, applies kernel filtering (see module
+/// docs), and spawns the receive loop. Requires CAP_NET_RAW/CAP_NET_ADMIN or
+/// root and an available HCI device.
 ///
-/// # Kernel-Level Filtering
-///
-/// To minimize CPU usage, two layers of kernel-level filtering are applied:
-/// 1. **HCI_FILTER** - Drops all non-LE-Meta-Event packets (commands, ACL, etc.)
-/// 2. **BPF filter** - Drops non-Ruuvi advertisements (Tile, smartwatches, etc.)
-///
-/// This ensures the application only wakes up for actual RuuviTag broadcasts,
-/// not for the many other BLE devices that may be in the environment.
-///
-/// # Arguments
-/// * `verbose` - If true, decode errors are sent as Err values; otherwise they're silently dropped.
-/// * `adapter` - Kernel adapter name (e.g. "hci1"), or `None` for `hci0`.
-/// * `scan_exit` - Whether to stop the adapter's LE scan on shutdown
-///   ([`ScanExitBehavior::Always`]) or leave it running
-///   ([`ScanExitBehavior::Never`], the default).
-///
-/// # Returns
-/// A scan session whose `measurements` receiver yields measurements (or decode
-/// errors if verbose). Stopping the session (`ScanSession::stop`) stops the
-/// adapter's scan when the behavior is [`ScanExitBehavior::Always`] and leaves
-/// it running when it is [`ScanExitBehavior::Never`].
-///
-/// # Requirements
-/// - CAP_NET_RAW and CAP_NET_ADMIN capabilities or root privileges
-/// - An available HCI device (typically hci0)
+/// `verbose` sends decode errors as `Err` values, otherwise they are dropped.
+/// `adapter` selects the controller (`None` means `hci0`). `scan_exit`
+/// selects whether `ScanSession::stop` disables the controller scan.
 pub async fn start_scan(
     verbose: bool,
     adapter: Option<String>,
@@ -165,8 +142,8 @@ pub async fn start_scan(
         .map_err(|e| ScanError::Bluetooth(format!("Failed to create async fd: {}", e)))?;
 
     // Spawn a task to read and process HCI events. The task owns the command
-    // socket so it can disable the adapter's LE scan on shutdown — closing the
-    // raw HCI socket alone does not stop scanning on Linux.
+    // socket so it can disable the adapter's LE scan on shutdown (closing the
+    // raw HCI socket alone does not stop scanning on Linux).
     let task = tokio::spawn(async move {
         let mut buf = [0u8; HCI_EVENT_BUF_SIZE]; // Max HCI event size
 

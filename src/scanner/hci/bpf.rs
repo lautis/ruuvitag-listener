@@ -133,27 +133,7 @@ impl BpfBuilder {
     }
 }
 
-/// Set up a BPF filter to match Ruuvi manufacturer ID at the kernel level.
-///
-/// This is the second layer of kernel-level filtering, complementing HCI_FILTER.
-/// While HCI_FILTER drops non-LE-Meta-Event packets, this BPF filter provides
-/// finer-grained filtering to drop:
-/// - Non-advertising LE Meta Events (connection complete, etc.)
-/// - Advertisements from non-Ruuvi devices (Tile trackers, smartwatches, etc.)
-///
-/// The filter checks:
-/// 1. Packet type is HCI_EVENT_PKT (0x04)
-/// 2. Event code is EVT_LE_META_EVENT (0x3E)
-/// 3. Subevent is EVT_LE_ADVERTISING_REPORT (0x02)
-/// 4. Packet contains Ruuvi manufacturer ID (0x9904) at common positions
-///
-/// Combined filtering layers:
-/// ```text
-/// All HCI packets
-///   └─[HCI_FILTER]─► Only LE Meta Events
-///       └─[BPF filter]─► Only Ruuvi advertising reports
-///           └─[Application]─► Parse and decode
-/// ```
+/// Only deliver advertising reports containing the Ruuvi manufacturer ID.
 pub(crate) fn set_bpf_ruuvi_filter(fd: &OwnedFd) -> Result<(), ScanError> {
     let filter = ruuvi_bpf_program();
 
@@ -270,10 +250,8 @@ fn ruuvi_bpf_program() -> Vec<SockFilter> {
 mod tests {
     use super::*;
 
-    /// Software classic-BPF interpreter for the instruction subset
-    /// [`ruuvi_bpf_program`] emits: absolute byte/half-word loads, `JEQ|K`
-    /// jumps, and `RET|K`. Returns the verdict: zero drops the packet,
-    /// non-zero keeps it.
+    // Minimal classic-BPF interpreter for the emitted subset (absolute
+    // byte/half-word loads, `JEQ|K`, `RET|K`). Zero drops the packet.
     fn run_bpf(prog: &[SockFilter], pkt: &[u8]) -> u32 {
         let mut pc = 0usize;
         let mut a: u32 = 0;
@@ -309,15 +287,13 @@ mod tests {
         }
     }
 
-    /// Ruuvi manufacturer ID as it appears on the wire: bytes 0x99 0x04,
-    /// big-endian.
+    // Ruuvi manufacturer ID as it appears on the wire (bytes 0x99 0x04).
     const RUUVI_ID_WIRE: [u8; 2] = {
         let bytes = RUUVI_ID_BE.to_be_bytes();
         [bytes[2], bytes[3]]
     };
 
-    /// Build an HCI advertising report with a manufacturer ID at `id_off`.
-    /// Every other payload byte is zeroed so no other offset can match.
+    // Advertising report with `id` at `id_off`; all other bytes are zero.
     fn advertising_report(subevent: u8, id_off: usize, id: [u8; 2]) -> Vec<u8> {
         let mut pkt = vec![0u8; 80];
         pkt[0] = HCI_EVENT_PKT;
@@ -329,8 +305,7 @@ mod tests {
         pkt
     }
 
-    /// Whether the Ruuvi filter keeps `pkt` — the test view of `run_bpf`'s
-    /// byte-count verdict.
+    // Whether the filter keeps `pkt` (`run_bpf` verdict != 0).
     fn kept(pkt: &[u8]) -> bool {
         run_bpf(&ruuvi_bpf_program(), pkt) != 0
     }

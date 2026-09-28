@@ -6,6 +6,9 @@
 //!
 //! The implementation is organized into [`ffi`], [`bpf`], [`parse`], and
 //! [`scan`] submodules.
+//!
+//! Kernel filtering: `HCI_FILTER` passes only LE Meta events, classic BPF
+//! passes only advertising reports containing the Ruuvi manufacturer ID.
 
 use crate::scanner::RUUVI_MANUFACTURER_ID;
 
