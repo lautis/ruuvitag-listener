@@ -205,8 +205,7 @@ mod tests {
         assert!(!might_be_ruuvi(&[0x99])); // Only one byte, can't match 2-byte pattern
     }
 
-    /// A single well-formed Ruuvi manufacturer AD entry (data format 5, zeroed
-    /// payload): the default AD content for [`ReportSpec`].
+    // Default AD content: format 5 with zeroed payload.
     const RUUVI_AD: &[u8] = &[
         27,   // AD length: type byte plus 26 bytes of payload
         0xFF, // AD type: manufacturer data
@@ -215,24 +214,16 @@ mod tests {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
 
-    /// The fields a test wants in (or done to) a report; `Default` is a valid
-    /// legacy Ruuvi advertising report (0x02). The fields mirror what the
-    /// parsers read, so a malformed case reads as named parameters instead of
-    /// magic byte offsets into a built packet.
+    // Test report parameters; `Default` is a valid legacy Ruuvi report.
     #[derive(Clone, Copy)]
     struct ReportSpec {
-        /// LE Meta subevent, which selects the report layout: the extended
-        /// (0x0D) header is built when this is `EVT_LE_EXTENDED_ADVERTISING_REPORT`.
+        // `0x0D` selects the extended header layout.
         subevent: u8,
-        /// Event code in the HCI header (`EVT_LE_META_EVENT` normally).
         event_code: u8,
-        /// `num_reports` in the per-report header.
         num_reports: u8,
-        /// AD data length the report claims; `None` sizes it to the real bytes.
+        // Claimed AD length; `None` uses the real length.
         data_len: Option<u8>,
-        /// Raw AD structures carried by the report ([`RUUVI_AD`] by default).
         ad: &'static [u8],
-        /// RSSI byte: trailing the data (legacy) or in the header (extended).
         rssi: u8,
     }
 
@@ -249,12 +240,7 @@ mod tests {
         }
     }
 
-    /// Build a full advertising report per `spec`.
-    ///
-    /// The format-specific header bytes (a 1-byte `event_type` for legacy, a
-    /// 2-byte one plus the extended fields for 0x0D) are the reason the
-    /// production parser carries a `ReportLayout`; only the shared prefix and
-    /// the AD tail are built once here.
+    // Build a full advertising report from `spec`.
     fn report(spec: ReportSpec) -> Vec<u8> {
         let extended = spec.subevent == EVT_LE_EXTENDED_ADVERTISING_REPORT;
         let ad = spec.ad;
@@ -283,9 +269,8 @@ mod tests {
         pkt
     }
 
-    /// An LE Meta Event whose per-report body is `body_len` bytes: a nonzero
-    /// `num_reports`, the Ruuvi ID (so the dispatch fast path passes) and
-    /// zeros — too short to decode, but not empty.
+    // LE Meta event with a `body_len`-byte body holding the Ruuvi ID plus
+    // zeros: passes the dispatch fast path but is too short to decode.
     fn truncated_meta_event(subevent: u8, body_len: usize) -> Vec<u8> {
         assert!(body_len >= 3);
         let mut pkt = vec![HCI_EVENT_PKT, EVT_LE_META_EVENT, 0x00, subevent];
@@ -295,8 +280,7 @@ mod tests {
         pkt
     }
 
-    /// Assert `result` is the fixture's RuuviTag — its address reversed from
-    /// the little-endian wire bytes 01..06 — carrying `rssi`.
+    // Check `result` decoded the fixture tag (wire bytes 01..06, reversed).
     fn assert_ruuvi_decode(result: Option<MeasurementResult>, rssi: Option<i8>) {
         let measurement = result
             .expect("expected a report")
@@ -308,8 +292,7 @@ mod tests {
         assert_eq!(measurement.rssi, rssi);
     }
 
-    /// Assert a parser reports "Advertising report too short" for `pkt` in
-    /// verbose mode. All the parsers share the `(&[u8], bool)` signature.
+    // Check verbose mode reports "too short" for `pkt`.
     fn assert_too_short(parse: fn(&[u8], bool) -> Option<MeasurementResult>, pkt: &[u8]) {
         assert_eq!(
             parse(pkt, true),
@@ -319,7 +302,7 @@ mod tests {
         );
     }
 
-    /// Assert a parser drops `pkt` in both verbosity modes.
+    // Check `pkt` is dropped in both verbosity modes.
     fn assert_silent(parse: fn(&[u8], bool) -> Option<MeasurementResult>, pkt: &[u8]) {
         assert!(parse(pkt, false).is_none());
         assert!(parse(pkt, true).is_none());

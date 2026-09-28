@@ -52,8 +52,9 @@ pub struct ScanSession {
 impl ScanSession {
     /// Wrap a scan managed by a backend task.
     ///
-    /// `cancel` requests the task to stop scanning; the task is expected to
-    /// disable the adapter's scan (and do any other cleanup) before finishing.
+    /// `cancel` requests the task to stop scanning; the task then does any
+    /// configured cleanup (the HCI backend disables the adapter's LE scan
+    /// only with [`ScanExitBehavior::Always`]) before finishing.
     /// Backend tasks report non-fatal problems through `warnings`.
     pub fn managed(
         measurements: mpsc::Receiver<MeasurementResult>,
@@ -201,24 +202,17 @@ impl Default for Backend {
 
 /// What the HCI backend does with the adapter's LE scan on shutdown.
 ///
-/// The controller's scan state is global: a scan left running keeps the radio
-/// awake for everyone, and disabling it stops whatever process started it. A
-/// scan this process leaves running also gets its duplicate-filtering policy
-/// put back, so its owner does not silently inherit ours.
-/// The BlueZ backend is unaffected — it ends its discovery session either way.
+/// The controller's scan is shared: disabling it stops scanning for every
+/// process on the adapter. The BlueZ backend is unaffected — it ends its
+/// discovery session either way.
 #[derive(clap::ValueEnum, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ScanExitBehavior {
-    /// Stop the scan on exit only if this process started it (default). A scan
-    /// that was already running is left to its original owner, with the
-    /// duplicate-filtering policy it had.
-    #[default]
-    OwnedOnly,
-    /// Always stop the scan on exit, even if another process started it. The
-    /// pre-0.9 behavior; use when this process owns the adapter.
+    /// Always stop the adapter's LE scan on exit. Use when this process owns
+    /// the adapter.
     Always,
-    /// Never stop the scan on exit, not even one this process started. The
-    /// adapter keeps scanning after the listener exits, with the duplicate
-    /// policy of whichever scan is running.
+    /// Never stop the adapter's LE scan on exit, not even one this process
+    /// started (default). The adapter keeps scanning after the listener exits.
+    #[default]
     Never,
 }
 
@@ -591,11 +585,11 @@ mod tests {
                     .to_string()
             })
             .collect();
-        assert_eq!(names, vec!["owned-only", "always", "never"]);
+        assert_eq!(names, vec!["always", "never"]);
         assert_eq!(
             ScanExitBehavior::default(),
-            ScanExitBehavior::OwnedOnly,
-            "owned-only is the documented default"
+            ScanExitBehavior::Never,
+            "never is the documented default"
         );
         assert_eq!(
             <ScanExitBehavior as ValueEnum>::from_str("always", false).unwrap(),

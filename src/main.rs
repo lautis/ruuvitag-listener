@@ -22,10 +22,10 @@ const EXIT_PANIC: i32 = 2;
 /// 5. Processes measurements and outputs them to stdout until interrupted
 ///
 /// On SIGINT (Ctrl-C) or SIGTERM, `stop` resolves and the run loop ends,
-/// giving the scanner backend a chance to disable the adapter's LE scan
-/// before the process exits. `--hci-scan-exit-behavior` decides whether a scan
-/// that another process started is left running (`owned-only`, the default),
-/// stopped regardless of who started it (`always`), or never stopped (`never`).
+/// giving the scanner backend a chance to do its configured shutdown cleanup
+/// before the process exits. The HCI backend disables the adapter's LE scan
+/// only with `--hci-scan-exit-behavior always`; `never` (the default) leaves
+/// it running.
 ///
 /// # Arguments
 /// * `run_options` - Command-line options parsed from user input
@@ -69,7 +69,8 @@ async fn main() {
 
     // Graceful shutdown: on SIGINT (Ctrl-C) or SIGTERM, stop reading
     // measurements. `run_with_io` then stops the scan so the HCI backend can
-    // tell the adapter to disable its LE scan (closing the socket alone does
+    // tell the adapter to disable its LE scan when
+    // `--hci-scan-exit-behavior always` is set (closing the socket alone does
     // not stop scanning) and the BlueZ backend can end discovery.
     let shutdown = CancellationToken::new();
     let signal_shutdown = shutdown.clone();
