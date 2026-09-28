@@ -2,7 +2,10 @@
 //! event read loop.
 
 use super::bpf::set_bpf_ruuvi_filter;
-use super::ffi::{HciSocket, configure_le_scan, disable_le_scan, read_packet};
+use super::ffi::{
+    HciSocket, configure_le_scan, disable_le_scan, read_packet, set_command_hci_filter,
+    set_hci_filter,
+};
 use super::parse::parse_event;
 use super::*;
 use crate::scanner::{
@@ -120,14 +123,14 @@ pub async fn start_scan(
 
     // Open and configure HCI socket for receiving events
     let event_socket = HciSocket::open(dev_id)?;
-    event_socket.set_event_filter()?;
+    set_hci_filter(&event_socket)?;
     set_bpf_ruuvi_filter(&event_socket)?; // Kernel-level filtering for Ruuvi packets
 
     // We need a separate socket for sending commands (bound to specific device).
     // It needs a filter that lets Command Complete events through so we can read
     // back command results and detect Bluetooth 5 extended-advertising support.
     let cmd_socket = HciSocket::open(dev_id)?;
-    cmd_socket.set_command_filter()?;
+    set_command_hci_filter(&cmd_socket)?;
 
     let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
     let (warn_tx, warn_rx) = mpsc::unbounded_channel::<String>();

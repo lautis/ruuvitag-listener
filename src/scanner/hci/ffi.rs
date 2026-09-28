@@ -6,7 +6,6 @@ use crate::scanner::ScanError;
 use libc::{AF_BLUETOOTH, SOCK_CLOEXEC, SOCK_RAW, c_int, c_void, sockaddr, socklen_t};
 use std::io;
 use std::mem;
-use std::ops::Deref;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 // HCI socket protocols and options
@@ -59,16 +58,6 @@ impl HciSocket {
         Ok(Self { fd })
     }
 
-    /// Restrict kernel-delivered packets to LE Meta Events.
-    pub(crate) fn set_event_filter(&self) -> Result<(), ScanError> {
-        set_hci_filter(&self.fd)
-    }
-
-    /// Restrict kernel-delivered packets to Command Complete events.
-    pub(crate) fn set_command_filter(&self) -> Result<(), ScanError> {
-        set_command_hci_filter(&self.fd)
-    }
-
     /// Dispatch an HCI command and return its Command Complete status and event.
     ///
     /// Unlike [`Self::command_checked`], this does not treat a non-zero status
@@ -104,14 +93,6 @@ impl HciSocket {
 impl AsRawFd for HciSocket {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
-    }
-}
-
-impl Deref for HciSocket {
-    type Target = OwnedFd;
-
-    fn deref(&self) -> &OwnedFd {
-        &self.fd
     }
 }
 
@@ -193,7 +174,7 @@ fn open_hci_socket() -> Result<OwnedFd, ScanError> {
 }
 
 /// Bind HCI socket to a device
-fn bind_hci_socket(fd: &OwnedFd, dev_id: u16) -> Result<(), ScanError> {
+fn bind_hci_socket(fd: &impl AsRawFd, dev_id: u16) -> Result<(), ScanError> {
     let addr = SockaddrHci {
         hci_family: AF_BLUETOOTH as u16,
         hci_dev: dev_id,
@@ -219,7 +200,7 @@ fn bind_hci_socket(fd: &OwnedFd, dev_id: u16) -> Result<(), ScanError> {
 ///
 /// `HCI_FILTER` cannot match the LE subevent, so all Meta events still arrive;
 /// BPF drops the non-advertising ones.
-fn set_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
+pub(crate) fn set_hci_filter(fd: &impl AsRawFd) -> Result<(), ScanError> {
     let mut filter = HciFilter::new();
     filter.set_ptype(HCI_EVENT_PKT); // Only HCI event packets (0x04)
     filter.set_event(EVT_LE_META_EVENT); // Only LE Meta Events (0x3E)
@@ -232,7 +213,7 @@ fn set_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
 /// to setup commands (feature query, scan enable). A freshly opened HCI raw
 /// socket has an all-zero filter that drops *every* packet, so without this the
 /// command responses would never reach userspace.
-fn set_command_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
+pub(crate) fn set_command_hci_filter(fd: &impl AsRawFd) -> Result<(), ScanError> {
     let mut filter = HciFilter::new();
     filter.set_ptype(HCI_EVENT_PKT);
     filter.set_event(EVT_CMD_COMPLETE);
@@ -240,7 +221,7 @@ fn set_command_hci_filter(fd: &OwnedFd) -> Result<(), ScanError> {
 }
 
 /// Apply an [`HciFilter`] to a socket via `setsockopt(SOL_HCI, HCI_FILTER)`.
-fn apply_hci_filter(fd: &OwnedFd, filter: &HciFilter) -> Result<(), ScanError> {
+fn apply_hci_filter(fd: &impl AsRawFd, filter: &HciFilter) -> Result<(), ScanError> {
     let ret = unsafe {
         libc::setsockopt(
             fd.as_raw_fd(),
@@ -259,7 +240,7 @@ fn apply_hci_filter(fd: &OwnedFd, filter: &HciFilter) -> Result<(), ScanError> {
 }
 
 /// Send an HCI command
-fn send_hci_command(fd: &OwnedFd, packet: &[u8]) -> Result<(), ScanError> {
+fn send_hci_command(fd: &impl AsRawFd, packet: &[u8]) -> Result<(), ScanError> {
     let ret = unsafe {
         libc::write(
             fd.as_raw_fd(),
@@ -291,7 +272,7 @@ pub(crate) fn read_packet(fd: &impl AsRawFd, buf: &mut [u8]) -> io::Result<usize
 /// The command socket is non-blocking, so we `poll(2)` for readiness and read
 /// events until the one for our command arrives (or we time out). Unrelated
 /// Command Complete events from other openers of the controller are skipped.
-fn read_command_complete(fd: &OwnedFd, expected_opcode: u16) -> Result<Vec<u8>, ScanError> {
+fn read_command_complete(fd: &impl AsRawFd, expected_opcode: u16) -> Result<Vec<u8>, ScanError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(COMMAND_TIMEOUT_MS);
     let mut buf = [0u8; HCI_EVENT_BUF_SIZE];
 

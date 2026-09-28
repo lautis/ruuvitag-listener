@@ -6,7 +6,7 @@ use crate::scanner::ScanError;
 use libc::{SO_ATTACH_FILTER, SOL_SOCKET, c_void, socklen_t};
 use std::io;
 use std::mem;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 
 // BPF instruction codes
 const BPF_LD: u16 = 0x00;
@@ -134,7 +134,7 @@ impl BpfBuilder {
 }
 
 /// Only deliver advertising reports containing the Ruuvi manufacturer ID.
-pub(crate) fn set_bpf_ruuvi_filter(fd: &OwnedFd) -> Result<(), ScanError> {
+pub(crate) fn set_bpf_ruuvi_filter(fd: &impl AsRawFd) -> Result<(), ScanError> {
     let filter = ruuvi_bpf_program();
 
     let prog = SockFprog {
