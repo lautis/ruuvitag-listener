@@ -145,8 +145,9 @@ pub async fn start_scan(
         .map_err(|e| ScanError::Bluetooth(format!("Failed to create async fd: {}", e)))?;
 
     // Spawn a task to read and process HCI events. The task owns the command
-    // socket so it can disable the adapter's LE scan on shutdown (closing the
-    // raw HCI socket alone does not stop scanning on Linux).
+    // socket so it can disable the adapter's LE scan on shutdown when
+    // `ScanExitBehavior::Always` is set (closing the raw HCI socket alone
+    // does not stop scanning on Linux).
     let task = tokio::spawn(async move {
         let mut buf = [0u8; HCI_EVENT_BUF_SIZE]; // Max HCI event size
 
