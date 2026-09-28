@@ -16,8 +16,8 @@ const AD_TYPE_MANUFACTURER_DATA: u8 = 0xFF;
 
 /// Quick check if a packet might contain Ruuvi manufacturer data.
 ///
-/// This performs a fast scan for the Ruuvi manufacturer ID bytes (0x99 0x04 in LE)
-/// to avoid expensive parsing of non-Ruuvi advertisements.
+/// This scans for the Ruuvi manufacturer ID bytes to avoid expensive parsing
+/// of non-Ruuvi advertisements.
 #[inline]
 pub(crate) fn might_be_ruuvi(data: &[u8]) -> bool {
     data.windows(2).any(|w| w == RUUVI_MANUFACTURER_ID_LE)
@@ -99,8 +99,11 @@ fn parse_report(data: &[u8], verbose: bool, layout: ReportLayout) -> Option<Meas
 
     let data_len = report[layout.data_len] as usize;
     let data_start = layout.data_len + 1;
+    // Unlike a short report header, an AD length that overruns the packet is
+    // malformed data rather than a truncated report, so it is dropped silently
+    // even in verbose mode.
     if report.len() < data_start + data_len {
-        return None; // truncated AD data
+        return None;
     }
     let rssi = match layout.rssi {
         // The RSSI byte follows the advertising data; a report truncated here
@@ -162,11 +165,9 @@ fn parse_ruuvi_from_ad_data(ad_data: &[u8], addr: [u8; 6], rssi: i8) -> Option<M
         let ad_type = ad_data[offset + 1];
 
         if ad_type == AD_TYPE_MANUFACTURER_DATA && len >= 3 {
-            // Extract manufacturer ID (little-endian)
             let mfg_id = u16::from_le_bytes([ad_data[offset + 2], ad_data[offset + 3]]);
 
             if mfg_id == RUUVI_MANUFACTURER_ID {
-                // Found RuuviTag data
                 let ruuvi_data = &ad_data[offset + 4..offset + 1 + len];
                 return Some(match decode_ruuvi_data(MacAddress(addr), ruuvi_data) {
                     Ok(measurement) => Ok(with_rssi(measurement, rssi)),

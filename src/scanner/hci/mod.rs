@@ -5,7 +5,8 @@
 //! CAP_NET_ADMIN capabilities or root privileges.
 //!
 //! The implementation is organized into [`ffi`], [`bpf`], [`parse`], and
-//! [`scan`] submodules.
+//! [`scan`] submodules. Constants shared by more than one submodule live here;
+//! constants with a single consumer live in that consumer's module.
 
 use crate::scanner::RUUVI_MANUFACTURER_ID;
 
@@ -15,9 +16,6 @@ mod parse;
 mod scan;
 
 pub use scan::start_scan;
-
-// Constants shared by more than one submodule live here; constants with a
-// single consumer live in that consumer's module.
 
 // HCI packet types
 const HCI_EVENT_PKT: u8 = 0x04;

@@ -50,13 +50,11 @@ const COMMAND_TIMEOUT_MS: u64 = 1000;
 /// LE scan interval and window: 200 ms in 0.625 ms units (0x140 = 320 ticks).
 const SCAN_200MS: u16 = 0x0140;
 
-// LE_Scan_Enable value (byte 7 of an LE Read Scan Enable response) that means
-// the controller is actively scanning.
+// LE_Scan_Enable value meaning the controller is actively scanning.
 const HCI_SCAN_ENABLED: u8 = 0x01;
 
-// Filter_Duplicates value (byte 8 of the same response) that means the
-// controller discards repeated advertisements from an address it has already
-// reported.
+// Filter_Duplicates value meaning the controller discards repeated
+// advertisements from an address it has already reported.
 const HCI_FILTER_DUPLICATES: u8 = 0x01;
 
 /// Owned raw HCI socket bound to one controller.

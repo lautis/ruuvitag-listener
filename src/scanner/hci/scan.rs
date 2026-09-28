@@ -82,7 +82,7 @@ async fn drain_events(
 ) -> bool {
     loop {
         let n = match guard.try_io(|inner| read_packet(inner, buf)) {
-            Ok(Ok(0)) | Err(_) => return true, // EOF or no more buffered data
+            Ok(Ok(0)) | Err(_) => return true, // nothing buffered right now
             Ok(Ok(n)) => n,
             Ok(Err(e)) => {
                 let _ = warn_tx.send(format!("failed to read HCI event: {e}"));
@@ -90,9 +90,8 @@ async fn drain_events(
             }
         };
 
-        // Parse any Ruuvi advertising report in this event; parse_event drops
-        // everything that is not one (non-LE-Meta-Events, non-Ruuvi payloads,
-        // unknown subevents).
+        // Decode errors are only forwarded in verbose mode; suppressing them
+        // otherwise is this loop's job, not the parser's.
         if let Some(result) = parse_event(&buf[..n], verbose)
             && (result.is_ok() || verbose)
             && tx.send(result).await.is_err()
@@ -231,7 +230,7 @@ pub async fn start_scan(
 ) -> Result<ScanSession, ScanError> {
     let dev_id = match adapter {
         Some(name) => resolve_adapter(&name)?,
-        None => 0, // default to hci0, as before
+        None => 0, // default to hci0
     };
 
     let event_socket = HciSocket::open(dev_id)?;

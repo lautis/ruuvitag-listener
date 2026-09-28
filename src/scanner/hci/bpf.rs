@@ -135,25 +135,9 @@ impl BpfBuilder {
 
 /// Set up a BPF filter to match Ruuvi manufacturer ID at the kernel level.
 ///
-/// This is the second layer of kernel-level filtering, complementing HCI_FILTER.
-/// While HCI_FILTER drops non-LE-Meta-Event packets, this BPF filter provides
-/// finer-grained filtering to drop:
-/// - Non-advertising LE Meta Events (connection complete, etc.)
-/// - Advertisements from non-Ruuvi devices (Tile trackers, smartwatches, etc.)
-///
-/// The filter checks:
-/// 1. Packet type is HCI_EVENT_PKT (0x04)
-/// 2. Event code is EVT_LE_META_EVENT (0x3E)
-/// 3. Subevent is EVT_LE_ADVERTISING_REPORT (0x02)
-/// 4. Packet contains Ruuvi manufacturer ID (0x9904) at common positions
-///
-/// Combined filtering layers:
-/// ```text
-/// All HCI packets
-///   └─[HCI_FILTER]─► Only LE Meta Events
-///       └─[BPF filter]─► Only Ruuvi advertising reports
-///           └─[Application]─► Parse and decode
-/// ```
+/// This is the second kernel-level filtering layer, complementing HCI_FILTER:
+/// it drops non-advertising LE Meta Events and advertisements from non-Ruuvi
+/// devices. See [`ruuvi_bpf_program`] for the checks it performs.
 pub(crate) fn set_bpf_ruuvi_filter(fd: &OwnedFd) -> Result<(), ScanError> {
     let filter = ruuvi_bpf_program();
 
@@ -255,11 +239,11 @@ fn ruuvi_bpf_program() -> Vec<SockFilter> {
         b.jeq(RUUVI_ID_BE, JumpTarget::Label(accept), JumpTarget::Next);
     }
 
-    // Reject: return 0 (drop packet)
+    // Reject: a zero return tells the kernel to drop the packet.
     debug_assert_eq!(b.mark(), reject);
     b.ret(0);
 
-    // Accept: return max packet size
+    // Accept: a non-zero return tells the kernel to keep it.
     debug_assert_eq!(b.mark(), accept);
     b.ret(0xFFFF);
 
