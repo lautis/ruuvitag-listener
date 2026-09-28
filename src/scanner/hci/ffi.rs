@@ -18,7 +18,6 @@ const OGF_LE_CTL: u16 = 0x08;
 const OCF_LE_READ_LOCAL_SUPPORTED_FEATURES: u16 = 0x0003;
 const OCF_LE_SET_SCAN_PARAMETERS: u16 = 0x000B;
 const OCF_LE_SET_SCAN_ENABLE: u16 = 0x000C;
-const OCF_LE_READ_SCAN_ENABLE: u16 = 0x000D;
 const OCF_LE_SET_EXTENDED_SCAN_PARAMETERS: u16 = 0x0041;
 const OCF_LE_SET_EXTENDED_SCAN_ENABLE: u16 = 0x0042;
 
@@ -46,15 +45,6 @@ const COMMAND_TIMEOUT_MS: u64 = 1000;
 
 /// LE scan interval and window: 200 ms in 0.625 ms units (0x140 = 320 ticks).
 const SCAN_200MS: u16 = 0x0140;
-
-// LE_Scan_Enable value (byte 7 of an LE Read Scan Enable response) that means
-// the controller is actively scanning.
-const HCI_SCAN_ENABLED: u8 = 0x01;
-
-// Filter_Duplicates value (byte 8 of the same response) that means the
-// controller discards repeated advertisements from an address it has already
-// reported.
-const HCI_FILTER_DUPLICATES: u8 = 0x01;
 
 /// Owned raw HCI socket bound to one controller.
 pub(crate) struct HciSocket {
@@ -383,45 +373,6 @@ fn controller_supports_extended_scan(fd: &HciSocket) -> Result<bool, ScanError> 
     }
 }
 
-/// The controller's LE scan state, as reported by `LE Read Scan Enable`.
-///
-/// This is the only scan configuration the spec lets us read back, which is
-/// why it is worth keeping both fields: the caller needs to know whether a
-/// scan is running to decide ownership, and the duplicate policy to put back
-/// when leaving someone else's scan running.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ScanState {
-    /// Whether the controller is actively scanning.
-    pub(crate) enabled: bool,
-    /// Whether the controller discards duplicate advertisements.
-    pub(crate) filter_duplicates: bool,
-}
-
-/// Parse an `LE Read Scan Enable` Command Complete response.
-///
-/// The status byte (6) is known to be success by the caller; byte 7 carries
-/// LE_Scan_Enable and byte 8 Filter_Duplicates. A response too short to hold
-/// a field reads as "off" for that field.
-fn scan_state(event: &[u8]) -> ScanState {
-    ScanState {
-        enabled: event.get(7).copied() == Some(HCI_SCAN_ENABLED),
-        filter_duplicates: event.get(8).copied() == Some(HCI_FILTER_DUPLICATES),
-    }
-}
-
-/// Read the controller's current LE scan state.
-///
-/// The `HCI_LE_Read_Scan_Enable` command (opcode 0x200D) reports the
-/// controller's current scan state regardless of which process started the
-/// scan, which is what tells the caller whether *it* is the scan's owner.
-///
-/// A failure here is not fatal: the caller falls back to assuming the
-/// controller was idle, so the scan it starts is treated as its own.
-pub(crate) fn le_scan_state(fd: &HciSocket) -> Result<ScanState, ScanError> {
-    let event = fd.command_checked(OGF_LE_CTL, OCF_LE_READ_SCAN_ENABLE, &[])?;
-    Ok(scan_state(&event))
-}
-
 /// Which LE scan command family to use: legacy (Bluetooth 4.x) vs extended
 /// (Bluetooth 5.x). Extended controllers only report advertisements via
 /// Extended Advertising Reports, so they must be driven with the extended
@@ -510,10 +461,6 @@ impl ScanMode {
 /// a discovery). Disabling an already-disabled scan is a no-op that some
 /// controllers reject with "Command Disallowed" (e.g. Broadcom BCM43455); the
 /// disable path tolerates that status (see [`scan_enable_status_ok`]).
-///
-/// Note that attaching to a pre-existing scan replaces its parameters. Only
-/// the duplicate-filtering policy is put back afterwards, by
-/// [`restore_le_scan_duplicates`]; the rest is not readable.
 fn configure_scan(fd: &HciSocket, mode: ScanMode) -> Result<(), ScanError> {
     set_scan_enable_with_duplicates(fd, mode, false, false)?;
     let params = mode.set_params_bytes();
@@ -525,11 +472,10 @@ fn configure_scan(fd: &HciSocket, mode: ScanMode) -> Result<(), ScanError> {
 /// Enable or disable LE scanning, tolerating "Command Disallowed" when
 /// disabling an already-disabled scan.
 ///
-/// `filter_duplicates` picks the controller-side dedup policy, and this
-/// listener asks for `false` on every path except putting someone else's
-/// policy back: RuuviTags re-broadcast largely unchanged payloads, so
-/// controller-side deduplication would discard measurements we still want to
-/// see.
+/// `filter_duplicates` picks the controller-side dedup policy; this listener
+/// always asks for `false`: RuuviTags re-broadcast largely unchanged payloads,
+/// so controller-side deduplication would discard measurements we still want
+/// to see.
 fn set_scan_enable_with_duplicates(
     fd: &HciSocket,
     mode: ScanMode,
@@ -562,46 +508,6 @@ pub(crate) fn configure_le_scan(fd: &HciSocket) -> Result<ScanMode, ScanError> {
 /// (legacy vs extended).
 pub(crate) fn disable_le_scan(fd: &HciSocket, mode: ScanMode) -> Result<(), ScanError> {
     set_scan_enable_with_duplicates(fd, mode, false, false)
-}
-
-/// Put back the duplicate-filtering policy of a scan this process attached to.
-///
-/// `Filter_Duplicates` is a parameter of LE Set Scan Enable, not of LE Set Scan
-/// Parameters, so restoring it needs no `LE Set Scan Parameters` round trip and
-/// leaves the scan interval, window, own address type and filter policy as
-/// they are. It is also the only piece of the previous configuration that can
-/// be restored: the spec provides no way to read those other parameters back,
-/// so they stay as this process configured them.
-///
-/// The re-read is what keeps this from starting a scan nobody wants: whoever
-/// owned the scan may have stopped it while this process was running, and
-/// setting `Filter_Duplicates` means sending `LE Set Scan Enable`, which
-/// re-enables scanning as a side effect. When that has happened there is
-/// nothing to put back, so nothing is sent and the reason is returned as a
-/// warning for the caller to report.
-///
-/// The scan is cycled rather than re-enabled in place. A controller that
-/// rejects a redundant `LE Set Scan Enable` answers `Command Disallowed` (see
-/// [`scan_enable_status_ok`]), which this path cannot tolerate, so the disable
-/// is issued first — it is already tolerated as a no-op — and the re-enable is
-/// the same command [`configure_scan`] issues successfully at startup. The
-/// cost is a scan gap of one command round trip, at process exit.
-///
-/// Returns the non-fatal warning to report, if there is one. Callers own
-/// warning delivery, so this stays free of any channel or runtime type.
-pub(crate) fn restore_le_scan_duplicates(
-    fd: &HciSocket,
-    mode: ScanMode,
-    filter_duplicates: bool,
-) -> Result<Option<String>, ScanError> {
-    if !le_scan_state(fd)?.enabled {
-        return Ok(Some(
-            "LE scan stopped while we ran; not restoring its duplicate policy".to_string(),
-        ));
-    }
-    set_scan_enable_with_duplicates(fd, mode, false, false)?;
-    set_scan_enable_with_duplicates(fd, mode, true, filter_duplicates)?;
-    Ok(None)
 }
 
 /// Whether a returned status is acceptable for an LE scan enable/disable
@@ -702,44 +608,5 @@ mod tests {
             ScanMode::Extended.enable_ocf(),
             OCF_LE_SET_EXTENDED_SCAN_ENABLE
         );
-    }
-
-    #[test]
-    fn test_scan_state_parses_command_complete() {
-        // Command Complete for LE Read Scan Enable (opcode 0x200d): status at
-        // byte 6, LE_Scan_Enable at byte 7, Filter_Duplicates at byte 8.
-        // Not scanning, duplicates not filtered.
-        let disabled = [0x04u8, 0x0E, 0x06, 0x01, 0x0D, 0x20, 0x00, 0x00, 0x00];
-        assert_eq!(
-            scan_state(&disabled),
-            ScanState {
-                enabled: false,
-                filter_duplicates: false
-            }
-        );
-
-        // Scanning, duplicates still not filtered.
-        let enabled = [0x04u8, 0x0E, 0x06, 0x01, 0x0D, 0x20, 0x00, 0x01, 0x00];
-        assert_eq!(
-            scan_state(&enabled),
-            ScanState {
-                enabled: true,
-                filter_duplicates: false
-            }
-        );
-
-        // The pre-existing owner's duplicate policy, which shutdown restores.
-        let filtering = [0x04u8, 0x0E, 0x06, 0x01, 0x0D, 0x20, 0x00, 0x01, 0x01];
-        assert_eq!(
-            scan_state(&filtering),
-            ScanState {
-                enabled: true,
-                filter_duplicates: true
-            }
-        );
-
-        // A truncated event reads as an idle controller with no filtering,
-        // which is the same fallback the caller uses on a failed query.
-        assert_eq!(scan_state(&[0x04, 0x0E]), ScanState::default());
     }
 }

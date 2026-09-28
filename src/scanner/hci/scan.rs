@@ -2,10 +2,7 @@
 //! event read loop.
 
 use super::bpf::set_bpf_ruuvi_filter;
-use super::ffi::{
-    HciSocket, ScanState, configure_le_scan, disable_le_scan, le_scan_state, read_packet,
-    restore_le_scan_duplicates,
-};
+use super::ffi::{HciSocket, configure_le_scan, disable_le_scan, read_packet};
 use super::parse::parse_event;
 use super::*;
 use crate::scanner::{
@@ -103,65 +100,6 @@ async fn drain_events(
     }
 }
 
-/// What this process does with the adapter's LE scan when the session ends.
-///
-/// Private to this backend: it only settles [`ScanExitBehavior`] against the
-/// controller state the backend already had to read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScanShutdown {
-    /// Send `LE Set Scan Enable (disable)` so the adapter stops scanning.
-    Stop,
-    /// Leave the adapter scanning, first putting back the given
-    /// `Filter_Duplicates` policy when there is one. Configuring our scan
-    /// replaced that policy of a scan we attached to; see
-    /// [`restore_le_scan_duplicates`] for what can and cannot be restored, and
-    /// for what happens if the scan has since stopped.
-    LeaveRunning {
-        /// The policy to put back, or `None` to send nothing and leave the
-        /// controller's current setting alone.
-        filter_duplicates: Option<bool>,
-    },
-}
-
-/// Fold a non-fatal warning into the fatal error that pre-empted it.
-///
-/// Setup warnings are delivered over the session's warnings channel, but a
-/// failure during setup means there is no session, so the warning has nowhere
-/// else to go. Prefixing keeps the context that explains the error.
-fn with_warning(error: ScanError, warning: Option<String>) -> ScanError {
-    let Some(warning) = warning else {
-        return error;
-    };
-    match error {
-        // Splice into the existing message rather than nesting, so the
-        // `Bluetooth error:` prefix is not repeated.
-        ScanError::Bluetooth(message) => ScanError::Bluetooth(format!("{warning}; {message}")),
-        other => ScanError::Bluetooth(format!("{warning}; {other}")),
-    }
-}
-
-impl ScanExitBehavior {
-    /// Settle what shutdown does with the scan. Must run before this process
-    /// configures its own: attaching to a pre-existing scan replaces its
-    /// parameters, so the answer has to be in hand first.
-    ///
-    /// `prior` is the controller's state; a failed `LE Read Scan Enable` reads
-    /// as idle, which counts as ours. `Always` ignores it and stops either way.
-    fn shutdown_for(self, prior: ScanState) -> ScanShutdown {
-        // Only "someone else was filtering duplicates" leaves a policy to put
-        // back; every other case already runs the way we want to leave it.
-        let filter_duplicates = (prior.enabled && prior.filter_duplicates).then_some(true);
-
-        match (self, prior.enabled) {
-            // `always` stops the scan whoever started it; `owned-only` stops it
-            // only when nobody else had one.
-            (Self::Always, _) | (Self::OwnedOnly, false) => ScanShutdown::Stop,
-            // `never`, and `owned-only` on someone else's scan: leave it be.
-            (Self::Never | Self::OwnedOnly, _) => ScanShutdown::LeaveRunning { filter_duplicates },
-        }
-    }
-}
-
 /// Start scanning for RuuviTag devices using raw HCI sockets.
 ///
 /// This function opens a raw HCI socket, configures LE scanning, and
@@ -180,15 +118,15 @@ impl ScanExitBehavior {
 /// # Arguments
 /// * `verbose` - If true, decode errors are sent as Err values; otherwise they're silently dropped.
 /// * `adapter` - Kernel adapter name (e.g. "hci1"), or `None` for `hci0`.
-/// * `scan_exit` - What to do with the adapter's LE scan on shutdown.
+/// * `scan_exit` - Whether to stop the adapter's LE scan on shutdown
+///   ([`ScanExitBehavior::Always`]) or leave it running
+///   ([`ScanExitBehavior::Never`], the default).
 ///
 /// # Returns
 /// A scan session whose `measurements` receiver yields measurements (or decode
-/// errors if verbose). Stopping the session (`ScanSession::stop`) disables the
-/// adapter's scan when [`ScanExitBehavior::OwnedOnly`] and this process started
-/// it, or unconditionally when the behavior is
-/// [`ScanExitBehavior::Always`]; a scan left to its original owner keeps
-/// running.
+/// errors if verbose). Stopping the session (`ScanSession::stop`) stops the
+/// adapter's scan when the behavior is [`ScanExitBehavior::Always`] and leaves
+/// it running when it is [`ScanExitBehavior::Never`].
 ///
 /// # Requirements
 /// - CAP_NET_RAW and CAP_NET_ADMIN capabilities or root privileges
@@ -217,29 +155,7 @@ pub async fn start_scan(
     let (tx, rx) = mpsc::channel(MEASUREMENT_CHANNEL_BUFFER_SIZE);
     let (warn_tx, warn_rx) = mpsc::unbounded_channel::<String>();
 
-    // Settle what shutdown will do before the scan is configured, since
-    // configuring it replaces any scan already running. If the query fails we
-    // assume the controller was idle, so the scan we are about to start counts
-    // as ours.
-    //
-    // The warning is held back rather than sent straight away: if configuring
-    // the scan then fails there is no session to carry it, so it rides along on
-    // the error instead of being dropped with the channel.
-    let (prior, state_warning) = match le_scan_state(&cmd_socket) {
-        Ok(prior) => (prior, None),
-        Err(e) => (
-            ScanState::default(),
-            Some(format!("failed to query LE scan state: {e}")),
-        ),
-    };
-    let shutdown = scan_exit.shutdown_for(prior);
-    let mode = match configure_le_scan(&cmd_socket) {
-        Ok(mode) => mode,
-        Err(e) => return Err(with_warning(e, state_warning)),
-    };
-    if let Some(warning) = state_warning {
-        let _ = warn_tx.send(warning);
-    }
+    let mode = configure_le_scan(&cmd_socket)?;
 
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
@@ -273,26 +189,13 @@ pub async fn start_scan(
             }
         }
 
-        // Put the controller back the way this process found it. Failures are
-        // reported, not propagated: the scan is already over and there is
-        // nothing left to abort.
-        let finished = match shutdown {
-            ScanShutdown::Stop => disable_le_scan(&cmd_socket, mode).map(|()| None),
-            // The controller already runs the policy we want to leave: a scan
-            // this process started, or a foreign scan that matched ours.
-            ScanShutdown::LeaveRunning {
-                filter_duplicates: None,
-            } => Ok(None),
-            // Someone else's scan: put their duplicate policy back before
-            // leaving it running, so its owner does not silently inherit ours.
-            ScanShutdown::LeaveRunning {
-                filter_duplicates: Some(policy),
-            } => restore_le_scan_duplicates(&cmd_socket, mode, policy),
-        };
-        let report = match finished {
-            Ok(Some(warning)) => Some(warning),
-            Ok(None) => None,
-            Err(e) => Some(format!("failed to finish the LE scan on hci{dev_id}: {e}")),
+        // Failures are reported, not propagated: the scan is already over and
+        // there is nothing left to abort.
+        let report = match scan_exit {
+            ScanExitBehavior::Always => disable_le_scan(&cmd_socket, mode)
+                .err()
+                .map(|e| format!("failed to finish the LE scan on hci{dev_id}: {e}")),
+            ScanExitBehavior::Never => None,
         };
         if let Some(report) = report {
             let _ = warn_tx.send(report);
@@ -305,76 +208,6 @@ pub async fn start_scan(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A prior scan state: off, scanning, or scanning with duplicate
-    /// filtering on.
-    fn prior(enabled: bool, filter_duplicates: bool) -> ScanState {
-        ScanState {
-            enabled,
-            filter_duplicates,
-        }
-    }
-
-    /// The `Some(policy)` to restore before leaving the scan running.
-    fn leave(filter_duplicates: Option<bool>) -> ScanShutdown {
-        ScanShutdown::LeaveRunning { filter_duplicates }
-    }
-
-    /// The whole behavior x prior-state matrix, so a change to any cell of
-    /// `shutdown_for` has to be a deliberate edit here.
-    #[test]
-    fn test_shutdown_for_matrix() {
-        // `scan_state` reads the two fields independently, so a controller can
-        // report a policy while reporting the scan off. That column matters:
-        // the scan is ours, so there is nothing of anyone else's to put back.
-        let states = [
-            prior(false, false),
-            prior(false, true),
-            prior(true, false),
-            prior(true, true),
-        ];
-        let cases = [
-            // (idle, idle with stale policy, foreign without dedup, foreign
-            // with dedup)
-            (
-                ScanExitBehavior::OwnedOnly,
-                [
-                    ScanShutdown::Stop,
-                    ScanShutdown::Stop,
-                    leave(None),
-                    leave(Some(true)),
-                ],
-            ),
-            (ScanExitBehavior::Always, [ScanShutdown::Stop; 4]),
-            (
-                ScanExitBehavior::Never,
-                [leave(None), leave(None), leave(None), leave(Some(true))],
-            ),
-        ];
-        for (behavior, expected) in cases {
-            for (state, expected) in states.into_iter().zip(expected) {
-                assert_eq!(
-                    behavior.shutdown_for(state),
-                    expected,
-                    "{behavior:?}.shutdown_for({state:?})"
-                );
-            }
-        }
-    }
-
-    /// A foreign scan that already matched ours has no policy to put back, and
-    /// restoring one would cycle a scan for no change.
-    #[test]
-    fn test_foreign_scan_without_dedup_needs_no_restore() {
-        assert_eq!(
-            ScanExitBehavior::Never.shutdown_for(prior(true, false)),
-            leave(None)
-        );
-        assert_eq!(
-            ScanExitBehavior::OwnedOnly.shutdown_for(prior(true, false)),
-            leave(None)
-        );
-    }
 
     #[test]
     fn test_parse_adapter_name() {
@@ -410,24 +243,5 @@ mod tests {
         assert_eq!(adapters, vec!["hci2".to_string(), "hci10".to_string()]);
 
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn test_with_warning_keeps_both_messages_without_repeating_the_prefix() {
-        let error = || ScanError::Bluetooth("HCI command 0x200c failed".to_string());
-
-        // The warning rides along in front of the error it explains. `ScanError`
-        // renders its own prefix, so nesting the error in the message instead
-        // of splicing would double it.
-        let rendered =
-            with_warning(error(), Some("failed to query LE scan state".to_string())).to_string();
-        assert_eq!(
-            rendered,
-            "Bluetooth error: failed to query LE scan state; HCI command 0x200c failed"
-        );
-        assert_eq!(rendered.matches("Bluetooth error:").count(), 1);
-
-        // No warning leaves the error exactly as it was.
-        assert_eq!(with_warning(error(), None).to_string(), error().to_string());
     }
 }

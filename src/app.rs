@@ -159,8 +159,9 @@ fn write_measurement(
 /// - On successful measurements, it optionally applies throttling, formats them, and writes a line to `out`.
 /// - On decode errors, it writes the error to `err` only when `options.verbose` is true.
 /// - When `stop` resolves (e.g. SIGINT/SIGTERM in the binary), the loop ends
-///   and the scan is stopped gracefully so the backend can disable the
-///   adapter's LE scan before the process exits.
+///   and the scan is stopped gracefully so the backend can do its configured
+///   shutdown cleanup (the HCI backend disables the adapter's LE scan only
+///   with [`ScanExitBehavior::Always`]) before the process exits.
 pub async fn run_with_io(
     options: Options,
     scanner: &impl Scanner,
@@ -376,9 +377,8 @@ mod tests {
                 .hci_scan_exit_behavior
         };
 
-        assert_eq!(parse(&["ruuvitag-listener"]), ScanExitBehavior::OwnedOnly);
+        assert_eq!(parse(&["ruuvitag-listener"]), ScanExitBehavior::Never);
         for (flag, expected) in [
-            ("owned-only", ScanExitBehavior::OwnedOnly),
             ("always", ScanExitBehavior::Always),
             ("never", ScanExitBehavior::Never),
         ] {
@@ -798,7 +798,7 @@ mod tests {
     #[tokio::test]
     async fn backend_warning_reaches_the_error_writer() {
         let scanner = EagerWarningScanner {
-            warning: "failed to query LE scan state: timed out",
+            warning: "example backend warning: timed out",
         };
         let options = Options {
             format: OutputFormat::Jsonl,
@@ -819,7 +819,7 @@ mod tests {
 
         let err = String::from_utf8(err).unwrap();
         assert!(
-            err.contains("failed to query LE scan state: timed out"),
+            err.contains("example backend warning: timed out"),
             "warning missing from err: {err:?}"
         );
     }
