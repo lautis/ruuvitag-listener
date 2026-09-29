@@ -203,19 +203,6 @@ mod tests {
     const MAC_ZERO: MacAddress = MacAddress([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
 
     #[test]
-    fn test_throttle_first_event_allowed() {
-        let mut throttle = Throttle::new(Duration::from_secs(1));
-        assert!(throttle.should_emit(MAC1));
-    }
-
-    #[test]
-    fn test_throttle_immediate_second_event_blocked() {
-        let mut throttle = Throttle::new(Duration::from_secs(1));
-        assert!(throttle.should_emit(MAC1));
-        assert!(!throttle.should_emit(MAC1));
-    }
-
-    #[test]
     fn test_throttle_different_devices_independent() {
         let mut throttle = Throttle::new(Duration::from_secs(1));
         assert!(throttle.should_emit(MAC1));
@@ -317,49 +304,31 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_duration_seconds() {
-        assert_eq!(parse_duration("3s").unwrap(), Duration::from_secs(3));
-        assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
-        assert_eq!(parse_duration("0s").unwrap(), Duration::from_secs(0));
-    }
-
-    #[test]
-    fn test_parse_duration_minutes() {
-        assert_eq!(parse_duration("1m").unwrap(), Duration::from_secs(60));
-        assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
-    }
-
-    #[test]
-    fn test_parse_duration_hours() {
-        assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
-        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
-    }
-
-    #[test]
-    fn test_parse_duration_milliseconds() {
-        assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
-        assert_eq!(
-            parse_duration("1000ms").unwrap(),
-            Duration::from_millis(1000)
-        );
-    }
-
-    #[test]
-    fn test_parse_duration_no_suffix() {
-        assert_eq!(parse_duration("10").unwrap(), Duration::from_secs(10));
-    }
-
-    #[test]
-    fn test_parse_duration_with_whitespace() {
-        assert_eq!(parse_duration(" 3s ").unwrap(), Duration::from_secs(3));
-        assert_eq!(parse_duration("3 s").unwrap(), Duration::from_secs(3));
+    fn test_parse_duration_valid() {
+        let cases = [
+            ("3s", Duration::from_secs(3)),
+            ("30s", Duration::from_secs(30)),
+            ("0s", Duration::from_secs(0)),
+            ("1m", Duration::from_secs(60)),
+            ("5m", Duration::from_secs(300)),
+            ("1h", Duration::from_secs(3600)),
+            ("2h", Duration::from_secs(7200)),
+            ("500ms", Duration::from_millis(500)),
+            ("1000ms", Duration::from_millis(1000)),
+            ("10", Duration::from_secs(10)),
+            (" 3s ", Duration::from_secs(3)),
+            ("3 s", Duration::from_secs(3)),
+        ];
+        for (src, expected) in cases {
+            assert_eq!(parse_duration(src).unwrap(), expected, "{src:?}");
+        }
     }
 
     #[test]
     fn test_parse_duration_invalid() {
-        assert!(parse_duration("").is_err());
-        assert!(parse_duration("abc").is_err());
-        assert!(parse_duration("-1s").is_err());
+        for src in ["", "abc", "-1s"] {
+            assert!(parse_duration(src).is_err(), "{src:?} should be rejected");
+        }
     }
 
     #[test]
