@@ -117,21 +117,20 @@ mod tests {
             Err(ParseMacError::InvalidLength(3))
         ));
         assert!(matches!(
+            "A:BB:CC:DD:EE:FF".parse::<MacAddress>(),
+            Err(ParseMacError::InvalidPartLength(0))
+        ));
+        assert!(matches!(
             "AA:BB:CC:DD:EE:GG".parse::<MacAddress>(),
             Err(ParseMacError::InvalidHex(_))
         ));
     }
 
+    #[cfg(feature = "bluer")]
     #[test]
-    fn test_hash_equality() {
-        use std::collections::HashMap;
-
-        let addr1 = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-        let addr2 = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-
-        let mut map = HashMap::new();
-        map.insert(addr1, "test");
-
-        assert_eq!(map.get(&addr2), Some(&"test"));
+    fn test_to_bluer_address() {
+        let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        let addr: bluer::Address = mac.into();
+        assert_eq!(addr.0, mac.0);
     }
 }
