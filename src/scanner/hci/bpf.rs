@@ -281,7 +281,7 @@ mod tests {
                     pc += 1 + offset as usize;
                     continue;
                 }
-                class => panic!("unsupported instruction class {class:#02x}"),
+                class => panic!("unsupported instruction class {class:#04x}"),
             }
             pc += 1;
         }
