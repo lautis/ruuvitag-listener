@@ -574,6 +574,32 @@ mod tests {
     }
 
     #[test]
+    fn adapter_not_found_reports_available_adapters() {
+        let available = vec!["hci0".to_string(), "hci1".to_string()];
+        match ScanError::adapter_not_found("hci9", Some(&available)) {
+            ScanError::Bluetooth(message) => assert_eq!(
+                message,
+                "Bluetooth adapter 'hci9' not found; available adapters: hci0, hci1"
+            ),
+            other => panic!("expected Bluetooth error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_not_found_omits_an_empty_adapter_list() {
+        let none: Option<&[String]> = None;
+        let empty: &[String] = &[];
+        for available in [none, Some(empty)] {
+            match ScanError::adapter_not_found("hci9", available) {
+                ScanError::Bluetooth(message) => {
+                    assert_eq!(message, "Bluetooth adapter 'hci9' not found");
+                }
+                other => panic!("expected Bluetooth error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn scan_exit_behavior_value_names() {
         use clap::ValueEnum;
         let names: Vec<String> = ScanExitBehavior::value_variants()
