@@ -23,9 +23,6 @@ pub struct InfluxDbFormatter {
 
 impl InfluxDbFormatter {
     /// Create a new InfluxDB formatter.
-    ///
-    /// # Arguments
-    /// * `measurement_name` - The measurement name to use in the line protocol
     pub fn new(measurement_name: String) -> Self {
         let needs_escape = Self::needs_measurement_escape(&measurement_name);
         Self {
@@ -54,11 +51,6 @@ impl InfluxDbFormatter {
     ///
     /// Escapes commas and spaces with backslashes.
     /// Measurement names must escape: `,` → `\,`, ` ` → `\ `
-    ///
-    /// # Arguments
-    /// * `buf` - The buffer to write to
-    /// * `s` - The measurement name string
-    /// * `needs_escape` - Whether escaping is needed (precomputed)
     #[inline]
     fn write_measurement_name(buf: &mut String, s: &str, needs_escape: bool) {
         if needs_escape {
@@ -191,16 +183,13 @@ impl OutputFormatter for InfluxDbFormatter {
             self.needs_measurement_escape,
         );
 
-        // Write tags directly
         Self::write_tags(&mut buf, m, name);
 
         // Space separator between tags and fields
         buf.push(' ');
 
-        // Write fields directly
         Self::write_fields(&mut buf, m);
 
-        // Write timestamp
         Self::write_timestamp(&mut buf, m.timestamp);
 
         buf

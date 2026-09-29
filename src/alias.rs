@@ -1,7 +1,4 @@
 //! MAC address aliasing for RuuviTag devices.
-//!
-//! This module provides functionality to map MAC addresses to human-readable names,
-//! making it easier to identify individual RuuviTag sensors in output.
 
 use crate::mac_address::MacAddress;
 use std::collections::HashMap;
@@ -19,12 +16,6 @@ pub struct Alias {
 }
 
 /// Parse an alias from a string in the format "MAC=NAME".
-///
-/// # Arguments
-/// * `src` - A string in the format "AA:BB:CC:DD:EE:FF=Name"
-///
-/// # Returns
-/// A Result containing the parsed Alias or an error message.
 ///
 /// # Example
 /// ```
@@ -50,12 +41,6 @@ pub fn parse_alias(src: &str) -> Result<Alias, String> {
 }
 
 /// Convert a slice of Alias values into an AliasMap.
-///
-/// # Arguments
-/// * `aliases` - A slice of Alias structs
-///
-/// # Returns
-/// A HashMap mapping MAC addresses to their human-readable names.
 pub fn to_map(aliases: &[Alias]) -> AliasMap {
     aliases
         .iter()
@@ -64,13 +49,6 @@ pub fn to_map(aliases: &[Alias]) -> AliasMap {
 }
 
 /// Resolve a device name from aliases, falling back to the MAC address string.
-///
-/// # Arguments
-/// * `mac` - The MAC address to resolve
-/// * `aliases` - The alias map to look up
-///
-/// # Returns
-/// The alias name if found, otherwise the MAC address formatted as a string.
 pub fn resolve_name(mac: &MacAddress, aliases: &AliasMap) -> String {
     aliases.get(mac).cloned().unwrap_or_else(|| mac.to_string())
 }

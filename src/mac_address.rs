@@ -1,7 +1,4 @@
 //! Efficient MAC address type for Bluetooth devices.
-//!
-//! This module provides a compact 6-byte MAC address representation that is
-//! decoupled from any specific Bluetooth library.
 
 use std::fmt;
 use std::hash::Hash;
@@ -55,12 +52,6 @@ impl FromStr for MacAddress {
         }
 
         Ok(MacAddress(bytes))
-    }
-}
-
-impl From<[u8; 6]> for MacAddress {
-    fn from(bytes: [u8; 6]) -> Self {
-        Self(bytes)
     }
 }
 

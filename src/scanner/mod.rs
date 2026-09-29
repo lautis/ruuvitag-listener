@@ -1,7 +1,4 @@
 //! BLE scanner abstraction for RuuviTag devices.
-//!
-//! This module provides a trait-based abstraction over different Bluetooth
-//! scanning backends, with shared decoding logic for RuuviTag sensor data.
 
 #[cfg(feature = "bluer")]
 pub mod bluer;
@@ -93,7 +90,7 @@ impl ScanSession {
 /// Error types for decoding RuuviTag data.
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum DecodeError {
-    /// Unsupported RuuviTag data format (e.g., V2 or V4, which are not supported)
+    /// Unsupported RuuviTag data format (e.g., V2 or V4)
     #[error("Unsupported format: {0}")]
     UnsupportedFormat(String),
     /// Invalid or corrupted data that cannot be decoded
@@ -263,23 +260,8 @@ impl std::str::FromStr for Backend {
 
 /// Decode manufacturer data from a RuuviTag into a Measurement.
 ///
-/// This function converts raw manufacturer data bytes into a structured `Measurement`
-/// with all values in standard SI units. Supports RuuviTag data formats V3, V5, V6 and E1.
-///
-/// # Arguments
-/// * `mac` - The MAC address of the device
-/// * `data` - The manufacturer-specific data bytes (without the company ID prefix)
-///
-/// # Returns
-/// A Result containing the decoded Measurement or a DecodeError.
-///
-/// # Unit Conversions
-/// - Temperature: milli-celsius → Celsius (divide by 1000)
-/// - Humidity: parts per million → percent (divide by 10000)
-/// - Battery voltage: millivolts → Volts (divide by 1000)
-/// - Acceleration: milli-g → g (divide by 1000)
-/// - Particulate matter: nanograms per cubic meter → micrograms per cubic meter (divide by 1000)
-/// - Luminosity: millilux → lux (divide by 1000)
+/// `data` is the manufacturer-specific data bytes with the company ID prefix
+/// already stripped. Supports RuuviTag data formats V3, V5, V6 and E1.
 pub fn decode_ruuvi_data(mac: MacAddress, data: &[u8]) -> Result<Measurement, DecodeError> {
     if data.is_empty() {
         return Err(DecodeError::InvalidData("Empty data".into()));
@@ -353,18 +335,9 @@ pub fn decode_ruuvi_data(mac: MacAddress, data: &[u8]) -> Result<Measurement, De
 
 /// Start scanning for RuuviTag devices using the specified backend.
 ///
-/// This is the main entry point for creating a scanner. It dispatches to the
-/// appropriate backend implementation based on the backend in `config`.
-///
-/// # Arguments
-/// * `config` - Scan parameters: backend, verbose flag, adapter name (or
-///   `None` for the backend default) and HCI scan-exit behavior.
-///
-/// # Returns
-/// A scan session whose `measurements` receiver yields measurements (or decode
-/// errors if verbose). The session can be stopped with
-/// [`ScanSession::stop`], which lets the backend disable the adapter's scan
-/// according to the configured [`ScanExitBehavior`].
+/// The returned session's `measurements` receiver yields measurements (or
+/// decode errors if verbose). [`ScanSession::stop`] lets the backend disable
+/// the adapter's scan according to the configured [`ScanExitBehavior`].
 pub async fn start_scan(config: ScanConfig) -> Result<ScanSession, ScanError> {
     let ScanConfig {
         backend,

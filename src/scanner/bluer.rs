@@ -21,19 +21,14 @@ impl From<bluer::Error> for ScanError {
 
 /// Start scanning for RuuviTag devices using the BlueZ D-Bus backend.
 ///
-/// This function initializes the Bluetooth adapter and starts a passive scan
-/// for RuuviTag advertisements. Discovered measurements are sent through the
-/// returned channel. Runs indefinitely until interrupted.
+/// Initializes the adapter and starts a passive scan; measurements arrive on
+/// the returned session's `measurements` receiver. `verbose` forwards decode
+/// errors instead of dropping them, and `adapter_name` selects the kernel
+/// adapter (e.g. "hci0"), or `None` for BlueZ's default.
 ///
-/// # Arguments
-/// * `verbose` - If true, decode errors are sent as Err values; otherwise they're silently dropped.
-/// * `adapter_name` - Kernel adapter name (e.g. "hci0"), or `None` for BlueZ's default adapter.
-///
-/// # Returns
-/// A scan session whose `measurements` receiver yields measurements (or decode
-/// errors if verbose). Stopping the session (`ScanSession::stop`) ends the
-/// discovery stream, which makes bluer drop its discovery session token and
-/// tell BlueZ to stop discovery on the adapter.
+/// Stopping the session ([`ScanSession::stop`]) ends the discovery stream,
+/// which makes bluer drop its discovery session token and tell BlueZ to stop
+/// discovery on the adapter.
 pub async fn start_scan(
     verbose: bool,
     adapter_name: Option<String>,
