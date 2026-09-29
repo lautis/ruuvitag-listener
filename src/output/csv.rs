@@ -96,7 +96,7 @@ mod tests {
     use crate::test_utils::{TEST_MAC, base_measurement, full_measurement, test_timestamp};
 
     #[test]
-    fn test_csv_header_lists_all_columns() {
+    fn header_lists_all_columns() {
         let formatter = CsvFormatter::new();
         let header = formatter.header().unwrap();
         let columns: Vec<&str> = header.split(',').collect();
@@ -132,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn test_csv_formatter_basic() {
+    fn row_lists_all_fields() {
         let formatter = CsvFormatter::new();
         let m = full_measurement();
         let row = formatter.format(&m, &TEST_MAC.to_string());
@@ -169,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn test_csv_formatter_partial_data() {
+    fn row_leaves_absent_fields_empty() {
         let formatter = CsvFormatter::new();
         let mut m = base_measurement(TEST_MAC, test_timestamp());
         m.temperature = Some(25.5);
@@ -185,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn test_csv_formatter_quotes_name_with_comma() {
+    fn quotes_name_with_comma() {
         let formatter = CsvFormatter::new();
         let m = base_measurement(TEST_MAC, test_timestamp());
         let row = formatter.format(&m, "Indoor, A");
@@ -194,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn test_csv_formatter_doubles_quotes_in_name() {
+    fn doubles_quotes_in_name() {
         let formatter = CsvFormatter::new();
         let m = base_measurement(TEST_MAC, test_timestamp());
         let row = formatter.format(&m, "He said \"hi\"");
@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn test_csv_formatter_quotes_name_with_line_break() {
+    fn quotes_name_with_line_break() {
         let formatter = CsvFormatter::new();
         let m = base_measurement(TEST_MAC, test_timestamp());
         let row = formatter.format(&m, "Sauna\nSuite");

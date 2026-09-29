@@ -171,7 +171,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_address_to_mac_address() {
+    fn converts_bluer_address_to_mac_address() {
         let addr = Address([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
         let mac: MacAddress = addr.into();
         assert_eq!(mac, MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]));

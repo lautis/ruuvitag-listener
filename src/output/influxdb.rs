@@ -215,7 +215,7 @@ mod tests {
     };
 
     #[test]
-    fn test_empty_measurement_name() {
+    fn writes_empty_measurement_name() {
         let formatter = InfluxDbFormatter::new("".to_string());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
         let measurement = base_measurement(TEST_MAC, timestamp);
@@ -228,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_device_name() {
+    fn writes_empty_tag_value() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
         let measurement = base_measurement(TEST_MAC, timestamp);
@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn test_device_name_with_multiple_special_chars() {
+    fn escapes_tag_value_special_characters() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
         let measurement = base_measurement(TEST_MAC, timestamp);
@@ -253,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn test_measurement_name_with_multiple_special_chars() {
+    fn escapes_measurement_name_special_characters() {
         let formatter = InfluxDbFormatter::new("ruuvi tag, v2".to_string());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
         let measurement = base_measurement(TEST_MAC, timestamp);
@@ -270,7 +270,7 @@ mod tests {
     // and pm10_0).
 
     #[test]
-    fn test_influxdb_formatter_exact_line() {
+    fn writes_exact_line_with_all_fields() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string());
         let result = formatter.format(&full_measurement_extremes(), "Sauna");
 
@@ -286,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn test_influxdb_formatter_exact_line_acceleration_only() {
+    fn writes_exact_line_with_acceleration_only() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string());
         let mut measurement = base_measurement(TEST_MAC, test_timestamp());
         measurement.acceleration = Some((0.01, -0.02, 1.0));
@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_influxdb_formatter_exact_line_without_fields() {
+    fn writes_exact_line_without_fields() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string());
         let measurement = base_measurement(TEST_MAC, test_timestamp());
 

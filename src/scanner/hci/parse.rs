@@ -186,21 +186,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_might_be_ruuvi_positive() {
+    fn might_be_ruuvi_matches_manufacturer_id() {
         // Packet containing Ruuvi manufacturer ID (0x0499 in little-endian = 0x99 0x04)
         let packet = [0x04, 0x3E, 0x1A, 0x02, 0x01, 0x00, 0x99, 0x04, 0x05, 0x12];
         assert!(might_be_ruuvi(&packet));
     }
 
     #[test]
-    fn test_might_be_ruuvi_negative() {
+    fn might_be_ruuvi_rejects_other_manufacturer_ids() {
         // Packet without Ruuvi manufacturer ID
         let packet = [0x04, 0x3E, 0x1A, 0x02, 0x01, 0x00, 0xAA, 0xBB, 0x05, 0x12];
         assert!(!might_be_ruuvi(&packet));
     }
 
     #[test]
-    fn test_might_be_ruuvi_empty() {
+    fn might_be_ruuvi_rejects_short_buffers() {
         assert!(!might_be_ruuvi(&[]));
         assert!(!might_be_ruuvi(&[0x99])); // Only one byte, can't match 2-byte pattern
     }
@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_extended_advertising_report() {
+    fn parses_extended_advertising_report() {
         let pkt = report(ReportSpec {
             subevent: EVT_LE_EXTENDED_ADVERTISING_REPORT,
             rssi: 0xC3, // -61 dBm
@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_report_too_short_verbose_error() {
+    fn report_too_short_is_verbose_error() {
         // A too-short report yields "Advertising report too short" in verbose
         // mode and nothing otherwise, whether parsed directly or dispatched
         // by parse_event.
@@ -332,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_legacy_advertising_report_with_rssi() {
+    fn parses_legacy_advertising_report_with_rssi() {
         let pkt = report(ReportSpec {
             rssi: 0xB0, // -80 dBm
             ..Default::default()
@@ -341,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_report_maps_rssi_sentinel_to_none() {
+    fn maps_rssi_sentinel_to_none() {
         // A legacy report whose RSSI byte is the 127 "not available" sentinel.
         let pkt = report(ReportSpec {
             rssi: RSSI_UNAVAILABLE as u8,
@@ -351,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_event_decodes_both_report_formats() {
+    fn decodes_both_report_formats() {
         for pkt in [
             report(ReportSpec::default()),
             report(ReportSpec {
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_event_rejects_foreign_payloads() {
+    fn rejects_foreign_payloads() {
         // A Ruuvi-shaped report carrying a different manufacturer ID is
         // dropped before the payload is touched.
         let pkt = report(ReportSpec {
@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_event_short_buffers_do_not_panic() {
+    fn short_buffers_do_not_panic() {
         // The receive loop feeds whatever the kernel delivers, so anything
         // shorter than the HCI header must be dropped, not panic.
         assert!(parse_event(&[], false).is_none());
@@ -399,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_event_zero_reports_is_not_an_error() {
+    fn zero_reports_is_not_an_error() {
         // A controller reporting no advertisements yields nothing to decode,
         // even in verbose mode.
         let pkt = report(ReportSpec {
@@ -410,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_event_truncated_ad_data_is_silent() {
+    fn truncated_ad_data_is_silent() {
         // The report is well-formed up to the data-length byte, which then
         // claims more AD data than the packet carries. Unlike a truncated
         // header this is dropped silently, even in verbose mode.
@@ -422,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_report_sub_header_buffer_is_verbose_error() {
+    fn sub_header_buffer_is_verbose_error() {
         // parse_event never routes sub-header buffers here, but the direct
         // parsers must not panic on them either; verbose reports the error,
         // silent mode drops the event.
@@ -442,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_report_walks_past_non_ruuvi_ad_entries() {
+    fn walks_past_non_ruuvi_ad_entries() {
         // Flags data, a foreign manufacturer entry, then the Ruuvi entry: the
         // AD walk must skip the first two and decode the third.
         let pkt = report(ReportSpec {
@@ -458,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_report_malformed_ad_length_is_silent() {
+    fn malformed_ad_length_is_silent() {
         // A zero-length AD entry terminates the walk without an error...
         let zero_len = report(ReportSpec {
             ad: &[0x00],
@@ -475,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_report_without_ruuvi_entry_is_silent() {
+    fn without_ruuvi_entry_is_silent() {
         // Flags and foreign manufacturer data, never a Ruuvi ID: the walk
         // exhausts the AD data and yields nothing.
         let pkt = report(ReportSpec {
@@ -486,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_report_decode_failure_propagates() {
+    fn decode_failure_propagates() {
         // The report is well-formed up to the payload, but the data format
         // byte (0x00) is unknown. The decoder error surfaces whether or not
         // verbose is set; suppressing it is the scan loop's job.

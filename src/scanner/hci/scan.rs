@@ -191,7 +191,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_adapter_name() {
+    fn parses_adapter_name() {
         assert_eq!(parse_adapter_name("hci0"), Some(0));
         assert_eq!(parse_adapter_name("hci1"), Some(1));
         assert_eq!(parse_adapter_name("1"), Some(1));
@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_adapter_rejects_invalid_name() {
+    fn resolve_adapter_rejects_invalid_name() {
         match resolve_adapter("not-an-adapter") {
             Err(ScanError::Bluetooth(message)) => {
                 assert!(message.contains("not-an-adapter"));
@@ -213,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn test_list_adapters_in_sorts_by_device_id() {
+    fn list_adapters_in_sorts_by_device_id() {
         let dir = std::env::temp_dir().join(format!("ruuvitag-hci-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("hci10")).unwrap();

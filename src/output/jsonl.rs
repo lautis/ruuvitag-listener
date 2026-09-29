@@ -108,7 +108,7 @@ mod tests {
     use crate::test_utils::{TEST_MAC, base_measurement, full_measurement, test_timestamp};
 
     #[test]
-    fn test_jsonl_formatter_basic() {
+    fn writes_all_fields() {
         let formatter = JsonLinesFormatter::new();
         let m = full_measurement();
         let line = formatter.format(&m, &TEST_MAC.to_string());
@@ -126,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn test_jsonl_formatter_omits_absent_fields() {
+    fn omits_absent_fields() {
         let formatter = JsonLinesFormatter::new();
         let mut m = base_measurement(TEST_MAC, test_timestamp());
         m.temperature = Some(25.5);
@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn test_jsonl_formatter_e1() {
+    fn writes_e1_fields() {
         let formatter = JsonLinesFormatter::new();
         let mut m = base_measurement(TEST_MAC, test_timestamp());
         m.format = crate::Format::E1;
@@ -155,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn test_jsonl_formatter_escapes_name() {
+    fn escapes_special_characters_in_name() {
         let formatter = JsonLinesFormatter::new();
         let m = base_measurement(TEST_MAC, test_timestamp());
         let name = "Ali\"as\\name\n\t\u{1}";
@@ -165,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn test_jsonl_formatter_utf8_name_preserved() {
+    fn preserves_utf8_in_name() {
         let formatter = JsonLinesFormatter::new();
         let m = base_measurement(TEST_MAC, test_timestamp());
         let line = formatter.format(&m, "Sauna ☀");

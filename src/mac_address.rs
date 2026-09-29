@@ -83,31 +83,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_display() {
+    fn displays_uppercase_hex_with_colons() {
         let addr = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
         assert_eq!(format!("{}", addr), "AA:BB:CC:DD:EE:FF");
     }
 
     #[test]
-    fn test_display_with_zeros() {
+    fn displays_zero_padded_octets() {
         let addr = MacAddress([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
         assert_eq!(format!("{}", addr), "00:01:02:03:04:05");
     }
 
     #[test]
-    fn test_from_str() {
+    fn parses_uppercase_hex() {
         let addr: MacAddress = "AA:BB:CC:DD:EE:FF".parse().unwrap();
         assert_eq!(addr.0, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
     }
 
     #[test]
-    fn test_from_str_lowercase() {
+    fn parses_lowercase_hex() {
         let addr: MacAddress = "aa:bb:cc:dd:ee:ff".parse().unwrap();
         assert_eq!(addr.0, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
     }
 
     #[test]
-    fn test_from_str_invalid() {
+    fn rejects_malformed_input() {
         assert!(matches!(
             "invalid".parse::<MacAddress>(),
             Err(ParseMacError::InvalidLength(1))
@@ -128,7 +128,7 @@ mod tests {
 
     #[cfg(feature = "bluer")]
     #[test]
-    fn test_to_bluer_address() {
+    fn converts_to_bluer_address() {
         let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
         let addr: bluer::Address = mac.into();
         assert_eq!(addr.0, mac.0);
