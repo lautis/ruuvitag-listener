@@ -158,10 +158,10 @@ mod tests {
     fn escapes_special_characters_in_name() {
         let formatter = JsonLinesFormatter::new();
         let m = base_measurement(TEST_MAC, test_timestamp());
-        let name = "Ali\"as\\name\n\t\u{1}";
+        let name = "Ali\"as\\name\n\t\r\u{8}\u{c}\u{1}";
         let line = formatter.format(&m, name);
 
-        assert!(line.contains(r#""name":"Ali\"as\\name\n\t\u0001""#));
+        assert!(line.contains(r#""name":"Ali\"as\\name\n\t\r\b\f\u0001""#));
     }
 
     #[test]
