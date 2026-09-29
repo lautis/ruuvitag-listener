@@ -1,7 +1,6 @@
 //! Event throttling for RuuviTag measurements.
 //!
-//! This module provides per-device throttling to limit how often measurements
-//! are emitted for each individual RuuviTag. This is useful for reducing output
+//! Limits how often measurements are emitted per device, to reduce output
 //! volume when tags broadcast frequently but data changes slowly.
 
 use crate::mac_address::MacAddress;
@@ -43,9 +42,6 @@ const CLEANUP_SIZE_THRESHOLD: usize = 50;
 impl Throttle {
     /// Create a new throttle with the specified minimum interval between events.
     ///
-    /// # Arguments
-    /// * `interval` - Minimum duration between events for each device
-    ///
     /// # Example
     /// ```
     /// use std::time::Duration;
@@ -68,12 +64,6 @@ impl Throttle {
     /// internal timer for this device is reset.
     ///
     /// Periodically cleans up stale entries to prevent memory leaks.
-    ///
-    /// # Arguments
-    /// * `mac` - The MAC address of the device (efficient 6-byte representation)
-    ///
-    /// # Returns
-    /// `true` if the event should be emitted, `false` if it should be throttled
     pub fn should_emit(&mut self, mac: MacAddress) -> bool {
         // Periodically clean up stale entries, but only if we have enough
         // entries to make it worthwhile
@@ -128,15 +118,9 @@ impl Throttle {
 ///
 /// Supports the following suffixes:
 /// - `s` or no suffix: seconds
-/// - `m`: minutes  
+/// - `m`: minutes
 /// - `h`: hours
 /// - `ms`: milliseconds
-///
-/// # Arguments
-/// * `src` - A string like "3s", "1m", "500ms", or "30"
-///
-/// # Returns
-/// A Result containing the parsed Duration or an error message.
 ///
 /// # Examples
 /// ```
@@ -248,7 +232,6 @@ mod tests {
     fn test_throttle_many_devices() {
         let mut throttle = Throttle::new(Duration::from_secs(1));
 
-        // Create 100 different MAC addresses
         let macs: Vec<MacAddress> = (0u8..100)
             .map(|i| MacAddress([i, i.wrapping_add(1), 0xCC, 0xDD, 0xEE, 0xFF]))
             .collect();
@@ -366,7 +349,6 @@ mod tests {
     fn test_throttle_cleanup_stale_entries() {
         let mut throttle = Throttle::new(Duration::from_millis(10));
 
-        // Add entries for two devices
         assert!(throttle.should_emit(MAC1));
         assert!(throttle.should_emit(MAC2));
 
@@ -417,7 +399,6 @@ mod tests {
     fn test_throttle_periodic_cleanup() {
         let mut throttle = Throttle::new(Duration::from_millis(10));
 
-        // Add a stale entry
         let old_time = Instant::now() - Duration::from_millis(200);
         throttle.last_seen.insert(MAC1, old_time);
 
@@ -441,7 +422,6 @@ mod tests {
     fn test_throttle_no_cleanup_below_size_threshold() {
         let mut throttle = Throttle::new(Duration::from_millis(10));
 
-        // Add a stale entry
         let old_time = Instant::now() - Duration::from_millis(200);
         throttle.last_seen.insert(MAC1, old_time);
 

@@ -359,7 +359,6 @@ mod tests {
                 for r in results {
                     let _ = tx.send(r).await;
                 }
-                // drop tx to close channel
             });
             Ok(ScanSession::unmanaged(rx))
         }

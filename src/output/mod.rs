@@ -1,7 +1,4 @@
 //! Output formatters for RuuviTag measurements.
-//!
-//! This module provides a trait for formatting measurements and implementations
-//! for various output formats: InfluxDB line protocol, JSON Lines, and CSV.
 
 pub mod csv;
 pub mod influxdb;
@@ -21,13 +18,6 @@ use jiff::{Timestamp, tz::TimeZone};
 /// determined by the caller. This keeps formatters simple and free of alias handling logic.
 pub trait OutputFormatter: Send + Sync {
     /// Format a measurement.
-    ///
-    /// # Arguments
-    /// * `measurement` - The measurement data to format (includes timestamp)
-    /// * `name` - The resolved device name (alias or MAC address)
-    ///
-    /// # Returns
-    /// A formatted string representation of the measurement
     fn format(&self, measurement: &Measurement, name: &str) -> String;
 
     /// Optional one-line header written once before the first measurement.

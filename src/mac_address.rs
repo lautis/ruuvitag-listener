@@ -1,7 +1,4 @@
 //! Efficient MAC address type for Bluetooth devices.
-//!
-//! This module provides a compact 6-byte MAC address representation that is
-//! decoupled from any specific Bluetooth library.
 
 use std::fmt;
 use std::hash::Hash;

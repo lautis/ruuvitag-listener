@@ -149,7 +149,7 @@ pub async fn start_scan(
     // `ScanExitBehavior::Always` is set (closing the raw HCI socket alone
     // does not stop scanning on Linux).
     let task = tokio::spawn(async move {
-        let mut buf = [0u8; HCI_EVENT_BUF_SIZE]; // Max HCI event size
+        let mut buf = [0u8; HCI_EVENT_BUF_SIZE];
 
         'receive: loop {
             tokio::select! {

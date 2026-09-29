@@ -36,18 +36,8 @@ impl Format {
 
 /// A measurement from a RuuviTag sensor.
 ///
-/// All values are in standard SI units:
-/// - Temperature in Celsius
-/// - Humidity in percent (0-100)
-/// - Pressure in Pascals
-/// - Battery voltage in Volts
-/// - TX power in dBm
-/// - RSSI in dBm
-/// - Acceleration in g (standard gravity)
-/// - PM2.5 in micrograms per cubic meter (ug/m3)
-/// - CO2 in parts per million (ppm)
-/// - VOC/NOx indexes are unitless scores
-/// - Luminosity in lux
+/// Optional fields are `None` when the advertisement format does not carry
+/// them; each field documents its unit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Measurement {
     /// MAC address of the RuuviTag (stored as efficient 6-byte array)

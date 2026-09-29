@@ -14,25 +14,11 @@ const EXIT_PANIC: i32 = 2;
 
 /// Main application entry point that sets up scanning and output formatting.
 ///
-/// This function:
-/// 1. Converts CLI aliases into a lookup map
-/// 2. Creates the output formatter selected with --format (InfluxDB line protocol by default)
-/// 3. Optionally creates a throttle to limit event frequency per tag
-/// 4. Starts the BLE scanner
-/// 5. Processes measurements and outputs them to stdout until interrupted
-///
 /// On SIGINT (Ctrl-C) or SIGTERM, `stop` resolves and the run loop ends,
 /// giving the scanner backend a chance to do its configured shutdown cleanup
 /// before the process exits. The HCI backend disables the adapter's LE scan
 /// only with `--hci-scan-exit-behavior always`; `never` (the default) leaves
 /// it running.
-///
-/// # Arguments
-/// * `run_options` - Command-line options parsed from user input
-/// * `stop` - Future resolving when a termination signal is received
-///
-/// # Errors
-/// Returns `ScanError` if Bluetooth initialization fails
 async fn run(run_options: Options, stop: impl Future<Output = ()> + Send) -> Result<(), RunError> {
     let scanner = RealScanner;
     let mut out = std::io::stdout();
