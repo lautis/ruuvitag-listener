@@ -512,6 +512,70 @@ mod tests {
         assert!(err.is_empty());
     }
 
+    /// A scanner whose setup fails, to exercise the error path.
+    struct FailingScanner;
+
+    impl Scanner for FailingScanner {
+        async fn start_scan(&self, _config: ScanConfig) -> Result<ScanSession, ScanError> {
+            Err(ScanError::Bluetooth("adapter unavailable".to_string()))
+        }
+    }
+
+    /// A writer that fails every write, to exercise the output error path.
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn scanner_start_failure_propagates_as_run_error() {
+        let mut out = Vec::<u8>::new();
+        let mut err = Vec::<u8>::new();
+
+        let result = run_with_io(
+            Options::default(),
+            &FailingScanner,
+            &mut out,
+            &mut err,
+            std::future::pending(),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(RunError::Scan(ScanError::Bluetooth(ref message)))
+                if message == "adapter unavailable"
+        ));
+    }
+
+    #[tokio::test]
+    async fn write_failure_propagates_as_io_error() {
+        let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let scanner = FakeScanner::new(vec![Ok(measurement(mac, timestamp))]);
+
+        let mut out = FailingWriter;
+        let mut err = Vec::<u8>::new();
+
+        let result = run_with_io(
+            Options::default(),
+            &scanner,
+            &mut out,
+            &mut err,
+            std::future::pending(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(RunError::Io(_))));
+    }
+
     #[tokio::test]
     async fn run_writes_measurements_to_out() {
         let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
