@@ -55,12 +55,6 @@ impl FromStr for MacAddress {
     }
 }
 
-impl From<[u8; 6]> for MacAddress {
-    fn from(bytes: [u8; 6]) -> Self {
-        Self(bytes)
-    }
-}
-
 #[cfg(feature = "bluer")]
 impl From<bluer::Address> for MacAddress {
     fn from(addr: bluer::Address) -> Self {
