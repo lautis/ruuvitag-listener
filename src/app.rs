@@ -150,8 +150,7 @@ impl SupersedePolicy {
                 false
             }
             Format::V6 => self.e1_devices.contains(&measurement.mac),
-            Format::V5 => false,
-            Format::V3 => false,
+            Format::V5 | Format::V3 => false,
         }
     }
 }
@@ -188,10 +187,10 @@ impl Pipeline {
     /// Returns the ready-to-write line without its trailing newline, or `None`
     /// when a policy drops the measurement.
     ///
-    /// Policy order is load-bearing and matches the run loop this replaced:
-    /// supersede-drop first, then throttle, then the only-aliased filter. The
-    /// throttle runs before the alias filter, so a measurement the alias
-    /// filter drops still counts as emitted for throttling purposes.
+    /// Supersede must run before the throttle: an E1 the throttle drops still
+    /// has to register the device, and a redundant V6 must not take a throttle
+    /// slot. The only-aliased filter is order-independent, since the alias set
+    /// is fixed for the run.
     fn handle(&mut self, measurement: Measurement) -> Option<String> {
         if self.supersede.is_redundant(&measurement) {
             return None;
@@ -209,6 +208,20 @@ impl Pipeline {
         let name = crate::alias::resolve_name(&measurement.mac, &self.aliases);
         Some(self.formatter.format(&measurement, &name))
     }
+}
+
+fn report_warning(err: &mut dyn Write, warning: String) -> io::Result<()> {
+    writeln!(err, "{warning}")
+}
+
+fn drain_shutdown_warnings(
+    warnings: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    err: &mut dyn Write,
+) -> io::Result<()> {
+    while let Ok(warning) = warnings.try_recv() {
+        report_warning(err, warning)?;
+    }
+    Ok(())
 }
 
 /// Run the core processing loop, writing formatted output to `out` and verbose errors to `err`.
@@ -277,7 +290,7 @@ pub async fn run_with_io(
                 None => break,
             },
             warning = session.warnings.recv(), if warnings_open => match warning {
-                Some(warning) => writeln!(err, "{warning}")?,
+                Some(warning) => report_warning(err, warning)?,
                 // The backend will send no more warnings, but the scan itself
                 // may still be running, so keep looping on the other arms.
                 None => warnings_open = false,
@@ -294,9 +307,7 @@ pub async fn run_with_io(
 
     // The loop stopped listening during shutdown, so surface warnings the
     // backend emitted while it was stopping (e.g. a failed LE scan disable).
-    while let Ok(warning) = session.warnings.try_recv() {
-        writeln!(err, "{warning}")?;
-    }
+    drain_shutdown_warnings(&mut session.warnings, err)?;
 
     Ok(())
 }
@@ -387,6 +398,22 @@ mod tests {
         }
     }
 
+    async fn run_test(
+        options: Options,
+        scanner: &impl Scanner,
+        stop: impl Future<Output = ()> + Send,
+    ) -> (String, String) {
+        let mut out = Vec::<u8>::new();
+        let mut err = Vec::<u8>::new();
+        run_with_io(options, scanner, &mut out, &mut err, stop)
+            .await
+            .unwrap();
+        (
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
+    }
+
     #[test]
     fn default_options_match_the_no_flag_command_line() {
         // Tests and embedders build `Options::default()` instead of spelling
@@ -454,17 +481,7 @@ mod tests {
         };
 
         let scanner = ConfigCapturingScanner::default();
-        let mut out = Vec::<u8>::new();
-        let mut err = Vec::<u8>::new();
-        run_with_io(
-            options,
-            &scanner,
-            &mut out,
-            &mut err,
-            std::future::ready(()),
-        )
-        .await
-        .unwrap();
+        run_test(options, &scanner, std::future::ready(())).await;
 
         let seen = scanner.seen.lock().unwrap().clone();
         let seen = seen.expect("the scanner was started");
@@ -478,35 +495,12 @@ mod tests {
     async fn run_ends_cleanly_when_stop_resolves() {
         // A scanner that never closes the channel: the run loop can only end
         // via the stop signal.
-        struct InfiniteScanner;
-
-        impl Scanner for InfiniteScanner {
-            async fn start_scan(&self, _config: ScanConfig) -> Result<ScanSession, ScanError> {
-                let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
-                // Keep the sender alive forever so the channel stays open.
-                tokio::spawn(async move {
-                    let _tx = tx;
-                    std::future::pending::<()>().await;
-                });
-                Ok(ScanSession::unmanaged(rx))
-            }
-        }
-
-        let options = Options::default();
-
-        let mut out = Vec::<u8>::new();
-        let mut err = Vec::<u8>::new();
+        let scanner = NoWarningScanner {
+            hold: Mutex::new(None),
+        };
         // A stop signal that is already resolved: the loop must break
         // immediately and `run_with_io` must return cleanly.
-        run_with_io(
-            options,
-            &InfiniteScanner,
-            &mut out,
-            &mut err,
-            std::future::ready(()),
-        )
-        .await
-        .unwrap();
+        let (out, err) = run_test(Options::default(), &scanner, std::future::ready(())).await;
 
         assert!(out.is_empty());
         assert!(err.is_empty());
@@ -519,23 +513,11 @@ mod tests {
         let m = measurement(mac, timestamp);
 
         let scanner = FakeScanner::new(vec![Ok(m)]);
-        let options = Options::default();
 
-        let mut out = Vec::<u8>::new();
-        let mut err = Vec::<u8>::new();
-        run_with_io(
-            options,
-            &scanner,
-            &mut out,
-            &mut err,
-            std::future::pending(),
-        )
-        .await
-        .unwrap();
+        let (out, err) = run_test(Options::default(), &scanner, std::future::pending()).await;
 
         assert!(err.is_empty());
 
-        let out = String::from_utf8(out).unwrap();
         assert!(out.contains("ruuvi_measurement,"));
         assert!(out.contains("mac=AA:BB:CC:DD:EE:FF"));
         assert!(out.contains("temperature=25.5"));
@@ -555,19 +537,8 @@ mod tests {
             ..Default::default()
         };
 
-        let mut out = Vec::<u8>::new();
-        let mut err = Vec::<u8>::new();
-        run_with_io(
-            options,
-            &scanner,
-            &mut out,
-            &mut err,
-            std::future::pending(),
-        )
-        .await
-        .unwrap();
+        let (out, _) = run_test(options, &scanner, std::future::pending()).await;
 
-        let out = String::from_utf8(out).unwrap();
         // only first should pass (no waiting in test, so second is within interval)
         assert_eq!(out.lines().count(), 1);
     }
@@ -738,21 +709,9 @@ mod tests {
             Ok(measurement_with_format(mac, ts, Format::E1)),
             Ok(measurement_with_format(mac, ts, Format::V6)),
         ]);
-        let options = Options::default();
 
-        let mut out = Vec::<u8>::new();
-        let mut err = Vec::<u8>::new();
-        run_with_io(
-            options,
-            &scanner,
-            &mut out,
-            &mut err,
-            std::future::pending(),
-        )
-        .await
-        .unwrap();
+        let (out, _) = run_test(Options::default(), &scanner, std::future::pending()).await;
 
-        let out = String::from_utf8(out).unwrap();
         assert_eq!(out.lines().count(), 2);
     }
 
@@ -767,33 +726,16 @@ mod tests {
             Ok(measurement(unaliased, ts)),
         ]);
         let options = Options {
-            influxdb_measurement: "ruuvi_measurement".to_string(),
-            format: OutputFormat::InfluxDb,
             aliases: vec![Alias {
                 address: aliased,
                 name: "Sauna".to_string(),
             }],
-            verbose: false,
-            throttle: None,
-            backend: Backend::default(),
-            adapter: None,
             only_aliased: true,
-            hci_scan_exit_behavior: ScanExitBehavior::default(),
+            ..Default::default()
         };
 
-        let mut out = Vec::<u8>::new();
-        let mut err = Vec::<u8>::new();
-        run_with_io(
-            options,
-            &scanner,
-            &mut out,
-            &mut err,
-            std::future::pending(),
-        )
-        .await
-        .unwrap();
+        let (out, _) = run_test(options, &scanner, std::future::pending()).await;
 
-        let out = String::from_utf8(out).unwrap();
         assert!(out.contains("name=Sauna"));
         assert!(!out.contains("11:22:33:44:55:66"));
         assert_eq!(out.lines().count(), 1);
@@ -808,37 +750,16 @@ mod tests {
         let base = Options::default();
 
         // non-verbose: nothing written
-        let mut out = Vec::<u8>::new();
-        let mut err = Vec::<u8>::new();
-        run_with_io(
-            base.clone(),
-            &scanner,
-            &mut out,
-            &mut err,
-            std::future::pending(),
-        )
-        .await
-        .unwrap();
+        let (out, err) = run_test(base.clone(), &scanner, std::future::pending()).await;
         assert!(out.is_empty());
         assert!(err.is_empty());
 
         // verbose: error is written to err
-        let mut out = Vec::<u8>::new();
-        let mut err = Vec::<u8>::new();
         let mut verbose = base;
         verbose.verbose = true;
-        run_with_io(
-            verbose,
-            &scanner,
-            &mut out,
-            &mut err,
-            std::future::pending(),
-        )
-        .await
-        .unwrap();
+        let (out, err) = run_test(verbose, &scanner, std::future::pending()).await;
 
         assert!(out.is_empty());
-        let err = String::from_utf8(err).unwrap();
         assert!(err.contains("Invalid data: bad packet"));
     }
 
@@ -854,19 +775,8 @@ mod tests {
             ..Default::default()
         };
 
-        let mut out = Vec::<u8>::new();
-        let mut err = Vec::<u8>::new();
-        run_with_io(
-            options,
-            &scanner,
-            &mut out,
-            &mut err,
-            std::future::pending(),
-        )
-        .await
-        .unwrap();
+        let (out, _) = run_test(options, &scanner, std::future::pending()).await;
 
-        let out = String::from_utf8(out).unwrap();
         let mut lines = out.lines();
         let header = lines.next().unwrap();
         assert!(header.starts_with("mac,name,timestamp,format,"));
@@ -887,19 +797,8 @@ mod tests {
             ..Default::default()
         };
 
-        let mut out = Vec::<u8>::new();
-        let mut err = Vec::<u8>::new();
-        run_with_io(
-            options,
-            &scanner,
-            &mut out,
-            &mut err,
-            std::future::pending(),
-        )
-        .await
-        .unwrap();
+        let (out, _) = run_test(options, &scanner, std::future::pending()).await;
 
-        let out = String::from_utf8(out).unwrap();
         let line = out.trim_end();
         assert!(line.starts_with("{\"mac\":\"AA:BB:CC:DD:EE:FF\""));
         assert!(line.contains("\"format\":\"v5\""));
@@ -907,47 +806,34 @@ mod tests {
         assert!(line.ends_with('}'));
     }
 
-    /// A backend that reports `warning` the moment the scan starts and then
-    /// keeps the scan running until it is stopped.
+    /// A backend that reports `warning` either at startup or while shutting
+    /// down, selected by `on_stop`.
     ///
     /// Mirrors a real backend: the measurement channel stays open for the whole
     /// session, so the run loop has something live to wait on.
-    struct EagerWarningScanner {
+    struct WarningScanner {
         warning: &'static str,
+        on_stop: bool,
     }
 
-    impl Scanner for EagerWarningScanner {
+    impl Scanner for WarningScanner {
         async fn start_scan(&self, _config: ScanConfig) -> Result<ScanSession, ScanError> {
             let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
             let (warn_tx, warn_rx) = mpsc::unbounded_channel::<String>();
             let cancel = CancellationToken::new();
             let task_cancel = cancel.clone();
             let warning = self.warning;
+            let on_stop = self.on_stop;
             let task = tokio::spawn(async move {
-                let _ = warn_tx.send(warning.to_string());
-                task_cancel.cancelled().await;
-                drop(tx);
-            });
-            Ok(ScanSession::managed(rx, warn_rx, cancel, task))
-        }
-    }
-
-    /// A backend that reports `warning` only while shutting down, i.e. after
-    /// the run loop has stopped listening for warnings.
-    struct StopWarningScanner {
-        warning: &'static str,
-    }
-
-    impl Scanner for StopWarningScanner {
-        async fn start_scan(&self, _config: ScanConfig) -> Result<ScanSession, ScanError> {
-            let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
-            let (warn_tx, warn_rx) = mpsc::unbounded_channel::<String>();
-            let cancel = CancellationToken::new();
-            let task_cancel = cancel.clone();
-            let warning = self.warning;
-            let task = tokio::spawn(async move {
-                task_cancel.cancelled().await;
-                let _ = warn_tx.send(warning.to_string());
+                if !on_stop {
+                    let _ = warn_tx.send(warning.to_string());
+                    task_cancel.cancelled().await;
+                } else {
+                    // Reported only while shutting down, i.e. after the run
+                    // loop has stopped listening for warnings.
+                    task_cancel.cancelled().await;
+                    let _ = warn_tx.send(warning.to_string());
+                }
                 drop(tx);
             });
             Ok(ScanSession::managed(rx, warn_rx, cancel, task))
@@ -956,27 +842,22 @@ mod tests {
 
     #[tokio::test]
     async fn backend_warning_reaches_the_error_writer() {
-        let scanner = EagerWarningScanner {
+        let scanner = WarningScanner {
             warning: "example backend warning: timed out",
+            on_stop: false,
         };
         let options = Options {
             format: OutputFormat::Jsonl,
             ..Default::default()
         };
 
-        let mut out = Vec::<u8>::new();
-        let mut err = Vec::<u8>::new();
-        run_with_io(
+        let (_, err) = run_test(
             options,
             &scanner,
-            &mut out,
-            &mut err,
             tokio::time::sleep(Duration::from_millis(50)),
         )
-        .await
-        .unwrap();
+        .await;
 
-        let err = String::from_utf8(err).unwrap();
         assert!(
             err.contains("example backend warning: timed out"),
             "warning missing from err: {err:?}"
@@ -988,27 +869,17 @@ mod tests {
         // `stop` resolves straight away, so the run loop leaves before the
         // backend task gets a chance to report anything. Only the drain after
         // `session.stop()` can catch this warning.
-        let scanner = StopWarningScanner {
+        let scanner = WarningScanner {
             warning: "failed to finish the LE scan on hci0: command failed",
+            on_stop: true,
         };
         let options = Options {
             format: OutputFormat::Jsonl,
             ..Default::default()
         };
 
-        let mut out = Vec::<u8>::new();
-        let mut err = Vec::<u8>::new();
-        run_with_io(
-            options,
-            &scanner,
-            &mut out,
-            &mut err,
-            std::future::ready(()),
-        )
-        .await
-        .unwrap();
+        let (_, err) = run_test(options, &scanner, std::future::ready(())).await;
 
-        let err = String::from_utf8(err).unwrap();
         assert!(
             err.contains("failed to finish the LE scan on hci0: command failed"),
             "shutdown warning missing from err: {err:?}"
