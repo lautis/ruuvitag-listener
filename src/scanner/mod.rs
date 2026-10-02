@@ -415,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_ruuvi_data_v5() {
+    fn decodes_v5_payload() {
         let measurement = decode_ruuvi_data(TEST_MAC, &v5_payload()).unwrap();
         assert_eq!(measurement.mac, TEST_MAC);
         assert_eq!(measurement.format, Format::V5);
@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_ruuvi_data_v3() {
+    fn decodes_v3_payload() {
         let measurement = decode_ruuvi_data(TEST_MAC, &v3_payload()).unwrap();
         assert_eq!(measurement.mac, TEST_MAC);
         assert_eq!(measurement.format, Format::V3);
@@ -476,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_ruuvi_data_e1() {
+    fn decodes_e1_payload() {
         let measurement = decode_ruuvi_data(TEST_MAC, &e1_payload()).unwrap();
         assert_eq!(measurement.mac, TEST_MAC);
         assert_eq!(measurement.format, Format::E1);
@@ -501,13 +501,13 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_ruuvi_data_invalid() {
+    fn rejects_invalid_payload() {
         let data: Vec<u8> = vec![0x00, 0x01, 0x02]; // Invalid/too short data
         assert!(decode_ruuvi_data(TEST_MAC, &data).is_err());
     }
 
     #[test]
-    fn test_decode_ruuvi_data_v6() {
+    fn decodes_v6_payload() {
         let measurement = decode_ruuvi_data(TEST_MAC, &v6_payload()).unwrap();
         assert_eq!(measurement.mac, TEST_MAC);
         assert_eq!(measurement.format, Format::V6);
@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_error_display() {
+    fn decode_error_display() {
         let err = DecodeError::InvalidData("test error".to_string());
         assert_eq!(format!("{}", err), "Invalid data: test error");
 
@@ -540,14 +540,40 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_error_display() {
+    fn scan_error_display() {
         let decode_err = DecodeError::InvalidData("test error".to_string());
         let err = ScanError::Decode(decode_err);
         assert_eq!(format!("{}", err), "Decode error: Invalid data: test error");
     }
 
     #[test]
-    fn test_scan_exit_behavior_value_names() {
+    fn adapter_not_found_reports_available_adapters() {
+        let available = vec!["hci0".to_string(), "hci1".to_string()];
+        match ScanError::adapter_not_found("hci9", Some(&available)) {
+            ScanError::Bluetooth(message) => assert_eq!(
+                message,
+                "Bluetooth adapter 'hci9' not found; available adapters: hci0, hci1"
+            ),
+            other => panic!("expected Bluetooth error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_not_found_omits_an_empty_adapter_list() {
+        let none: Option<&[String]> = None;
+        let empty: &[String] = &[];
+        for available in [none, Some(empty)] {
+            match ScanError::adapter_not_found("hci9", available) {
+                ScanError::Bluetooth(message) => {
+                    assert_eq!(message, "Bluetooth adapter 'hci9' not found");
+                }
+                other => panic!("expected Bluetooth error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn scan_exit_behavior_value_names() {
         use clap::ValueEnum;
         let names: Vec<String> = ScanExitBehavior::value_variants()
             .iter()
@@ -576,32 +602,32 @@ mod tests {
     // single-backend builds.
     #[test]
     #[cfg(feature = "bluer")]
-    fn test_backend_from_str_bluer() {
+    fn parses_bluer_backend_name() {
         assert_eq!(Backend::from_str("bluer").unwrap(), Backend::Bluer);
         assert_eq!(Backend::from_str("bluez").unwrap(), Backend::Bluer);
     }
 
     #[test]
     #[cfg(feature = "hci")]
-    fn test_backend_from_str_hci() {
+    fn parses_hci_backend_name() {
         assert_eq!(Backend::from_str("hci").unwrap(), Backend::Hci);
         assert_eq!(Backend::from_str("raw").unwrap(), Backend::Hci);
     }
 
     #[test]
-    fn test_backend_from_str_rejects_unknown() {
+    fn rejects_unknown_backend_name() {
         assert!(Backend::from_str("invalid").is_err());
     }
 
     #[test]
     #[cfg(feature = "bluer")]
-    fn test_backend_display_bluer() {
+    fn displays_bluer_backend() {
         assert_eq!(format!("{}", Backend::Bluer), "bluer");
     }
 
     #[test]
     #[cfg(feature = "hci")]
-    fn test_backend_display_hci() {
+    fn displays_hci_backend() {
         assert_eq!(format!("{}", Backend::Hci), "hci");
     }
 }

@@ -203,105 +203,8 @@ mod tests {
         TEST_MAC, base_measurement, full_measurement_extremes, test_timestamp,
     };
 
-    fn assert_contains_all(haystack: &str, needles: &[&str]) {
-        for needle in needles {
-            assert!(
-                haystack.contains(needle),
-                "expected output to contain {needle:?}\noutput: {haystack}"
-            );
-        }
-    }
-
     #[test]
-    fn test_influxdb_formatter_with_alias() {
-        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
-        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
-        let mut measurement = base_measurement(TEST_MAC, timestamp);
-        measurement.temperature = Some(80.0);
-
-        // Name is now passed by caller (alias resolved at app layer)
-        let result = formatter.format(&measurement, "Sauna");
-
-        assert_contains_all(&result, &["name=Sauna", "mac=AA:BB:CC:DD:EE:FF"]);
-    }
-
-    #[test]
-    fn test_influxdb_formatter_partial_data() {
-        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
-        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
-        let mut measurement = base_measurement(TEST_MAC, timestamp);
-        measurement.temperature = Some(25.5);
-
-        let result = formatter.format(&measurement, "AA:BB:CC:DD:EE:FF");
-
-        assert!(result.contains("temperature=25.5"));
-        assert!(!result.contains("humidity="));
-        assert!(!result.contains("pressure="));
-    }
-
-    #[test]
-    fn test_measurement_name_with_space() {
-        let formatter = InfluxDbFormatter::new("ruuvi tag".to_string());
-        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
-        let measurement = base_measurement(TEST_MAC, timestamp);
-
-        let result = formatter.format(&measurement, "Device");
-
-        // InfluxDB requires spaces in measurement names to be escaped as \
-        assert!(result.starts_with("ruuvi\\ tag"));
-    }
-
-    #[test]
-    fn test_measurement_name_with_comma() {
-        let formatter = InfluxDbFormatter::new("ruuvi,tag".to_string());
-        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
-        let measurement = base_measurement(TEST_MAC, timestamp);
-
-        let result = formatter.format(&measurement, "Device");
-
-        // InfluxDB requires commas in measurement names to be escaped as \,
-        assert!(result.starts_with("ruuvi\\,tag"));
-    }
-
-    #[test]
-    fn test_device_name_with_space() {
-        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
-        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
-        let measurement = base_measurement(TEST_MAC, timestamp);
-
-        let result = formatter.format(&measurement, "Living Room");
-
-        // InfluxDB requires spaces in tag values to be escaped as \
-        assert!(result.contains("name=Living\\ Room"));
-    }
-
-    #[test]
-    fn test_device_name_with_comma() {
-        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
-        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
-        let measurement = base_measurement(TEST_MAC, timestamp);
-
-        let result = formatter.format(&measurement, "Kitchen, Upstairs");
-
-        // InfluxDB requires commas and spaces in tag values to be escaped
-        // "Kitchen, Upstairs" becomes "Kitchen\\,\\ Upstairs"
-        assert!(result.contains("name=Kitchen\\,\\ Upstairs"));
-    }
-
-    #[test]
-    fn test_device_name_with_equals() {
-        let formatter = InfluxDbFormatter::new("ruuvi".to_string());
-        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
-        let measurement = base_measurement(TEST_MAC, timestamp);
-
-        let result = formatter.format(&measurement, "tag=value");
-
-        // InfluxDB requires equals signs in tag values to be escaped as \=
-        assert!(result.contains("name=tag\\=value"));
-    }
-
-    #[test]
-    fn test_empty_measurement_name() {
+    fn writes_empty_measurement_name() {
         let formatter = InfluxDbFormatter::new("".to_string());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
         let measurement = base_measurement(TEST_MAC, timestamp);
@@ -314,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_device_name() {
+    fn writes_empty_tag_value() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
         let measurement = base_measurement(TEST_MAC, timestamp);
@@ -326,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn test_device_name_with_multiple_special_chars() {
+    fn escapes_tag_value_special_characters() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
         let measurement = base_measurement(TEST_MAC, timestamp);
@@ -339,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn test_measurement_name_with_multiple_special_chars() {
+    fn escapes_measurement_name_special_characters() {
         let formatter = InfluxDbFormatter::new("ruuvi tag, v2".to_string());
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000000000);
         let measurement = base_measurement(TEST_MAC, timestamp);
@@ -356,7 +259,7 @@ mod tests {
     // and pm10_0).
 
     #[test]
-    fn test_influxdb_formatter_exact_line() {
+    fn writes_exact_line_with_all_fields() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string());
         let result = formatter.format(&full_measurement_extremes(), "Sauna");
 
@@ -372,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn test_influxdb_formatter_exact_line_acceleration_only() {
+    fn writes_exact_line_with_acceleration_only() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string());
         let mut measurement = base_measurement(TEST_MAC, test_timestamp());
         measurement.acceleration = Some((0.01, -0.02, 1.0));
@@ -385,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn test_influxdb_formatter_exact_line_without_fields() {
+    fn writes_exact_line_without_fields() {
         let formatter = InfluxDbFormatter::new("ruuvi".to_string());
         let measurement = base_measurement(TEST_MAC, test_timestamp());
 

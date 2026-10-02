@@ -281,7 +281,7 @@ mod tests {
                     pc += 1 + offset as usize;
                     continue;
                 }
-                class => panic!("unsupported instruction class {class:#02x}"),
+                class => panic!("unsupported instruction class {class:#04x}"),
             }
             pc += 1;
         }
@@ -311,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_accepts_legacy_ruuvi_report() {
+    fn filter_accepts_legacy_ruuvi_report() {
         // Legacy report: AD data starts at offset 14, so a real RuuviTag's
         // manufacturer ID (after the AD length and type bytes) sits at 16.
         assert!(kept(&advertising_report(
@@ -322,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_accepts_extended_ruuvi_report() {
+    fn filter_accepts_extended_ruuvi_report() {
         // Extended report: the per-report header is 25 bytes, so AD data
         // starts at offset 29 and the manufacturer ID follows at 31.
         assert!(kept(&advertising_report(
@@ -333,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_accepts_id_at_every_scanned_offset() {
+    fn filter_accepts_id_at_every_scanned_offset() {
         for off in FIRST_OFFSET..=LAST_OFFSET {
             assert!(
                 kept(&advertising_report(
@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_rejects_id_outside_scanned_window() {
+    fn filter_rejects_id_outside_scanned_window() {
         for off in [FIRST_OFFSET - 1, LAST_OFFSET + 1, LAST_OFFSET + 2] {
             assert!(
                 !kept(&advertising_report(
@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_rejects_non_ruuvi_packets() {
+    fn filter_rejects_non_ruuvi_packets() {
         // A valid advertising report carrying a different manufacturer ID at
         // the Ruuvi position is dropped.
         assert!(!kept(&advertising_report(
@@ -385,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bpf_builder_resolves_jump_targets() {
+    fn bpf_builder_resolves_jump_targets() {
         let mut b = BpfBuilder::with_capacity(4);
         b.load_byte(0);
         // `a` labels the final ret(0xFFFF) at instruction index 3.

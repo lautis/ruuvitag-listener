@@ -493,7 +493,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_hci_filter_setup() {
+    fn hci_filter_sets_expected_bits() {
         let mut filter = HciFilter::new();
         filter.set_ptype(HCI_EVENT_PKT);
         filter.set_event(EVT_LE_META_EVENT);
@@ -506,14 +506,14 @@ mod tests {
     }
 
     #[test]
-    fn test_hci_command_packet() {
+    fn hci_command_packet_layout() {
         // opcode 0x200C (OGF_LE_CTL << 10 | OCF_LE_SET_SCAN_ENABLE), 2 params
         let packet = hci_command_packet(OGF_LE_CTL, OCF_LE_SET_SCAN_ENABLE, &[0x01, 0x00]);
         assert_eq!(packet, vec![0x01, 0x0C, 0x20, 0x02, 0x01, 0x00]);
     }
 
     #[test]
-    fn test_scan_enable_status_ok() {
+    fn scan_enable_status_acceptance() {
         // Success is always acceptable.
         assert!(scan_enable_status_ok(true, 0x00));
         assert!(scan_enable_status_ok(false, 0x00));
@@ -526,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_mode_wire_bytes_and_ocfs() {
+    fn scan_mode_wire_bytes_and_ocfs() {
         // Legacy LE Set Scan Parameters: scan_type=passive, 200ms interval and
         // window, public address, accept-all filter policy (7 bytes).
         assert_eq!(

@@ -187,20 +187,7 @@ mod tests {
     const MAC_ZERO: MacAddress = MacAddress([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
 
     #[test]
-    fn test_throttle_first_event_allowed() {
-        let mut throttle = Throttle::new(Duration::from_secs(1));
-        assert!(throttle.should_emit(MAC1));
-    }
-
-    #[test]
-    fn test_throttle_immediate_second_event_blocked() {
-        let mut throttle = Throttle::new(Duration::from_secs(1));
-        assert!(throttle.should_emit(MAC1));
-        assert!(!throttle.should_emit(MAC1));
-    }
-
-    #[test]
-    fn test_throttle_different_devices_independent() {
+    fn allows_first_event_and_blocks_repeats_per_device() {
         let mut throttle = Throttle::new(Duration::from_secs(1));
         assert!(throttle.should_emit(MAC1));
         assert!(throttle.should_emit(MAC2));
@@ -209,14 +196,14 @@ mod tests {
     }
 
     #[test]
-    fn test_throttle_zero_interval() {
+    fn allows_every_event_with_zero_interval() {
         let mut throttle = Throttle::new(Duration::ZERO);
         assert!(throttle.should_emit(MAC1));
         assert!(throttle.should_emit(MAC1));
     }
 
     #[test]
-    fn test_throttle_allowed_after_interval_passes() {
+    fn allows_event_after_interval_passes() {
         let mut throttle = Throttle::new(Duration::from_millis(10));
         assert!(throttle.should_emit(MAC1));
         assert!(!throttle.should_emit(MAC1));
@@ -229,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn test_throttle_many_devices() {
+    fn tracks_many_devices_independently() {
         let mut throttle = Throttle::new(Duration::from_secs(1));
 
         let macs: Vec<MacAddress> = (0u8..100)
@@ -256,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn test_throttle_zero_mac_address() {
+    fn treats_zero_mac_as_valid_key() {
         let mut throttle = Throttle::new(Duration::from_secs(1));
 
         // Zero address is a valid key
@@ -265,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn test_throttle_timer_resets_on_emit() {
+    fn resets_timer_on_emit() {
         let mut throttle = Throttle::new(Duration::from_millis(20));
 
         assert!(throttle.should_emit(MAC1));
@@ -283,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn test_throttle_blocked_event_does_not_reset_timer() {
+    fn blocked_event_does_not_reset_timer() {
         let mut throttle = Throttle::new(Duration::from_millis(30));
 
         assert!(throttle.should_emit(MAC1)); // t=0, timer starts
@@ -300,53 +287,35 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_duration_seconds() {
-        assert_eq!(parse_duration("3s").unwrap(), Duration::from_secs(3));
-        assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
-        assert_eq!(parse_duration("0s").unwrap(), Duration::from_secs(0));
+    fn parses_valid_durations() {
+        let cases = [
+            ("3s", Duration::from_secs(3)),
+            ("30s", Duration::from_secs(30)),
+            ("0s", Duration::from_secs(0)),
+            ("1m", Duration::from_secs(60)),
+            ("5m", Duration::from_secs(300)),
+            ("1h", Duration::from_secs(3600)),
+            ("2h", Duration::from_secs(7200)),
+            ("500ms", Duration::from_millis(500)),
+            ("1000ms", Duration::from_millis(1000)),
+            ("10", Duration::from_secs(10)),
+            (" 3s ", Duration::from_secs(3)),
+            ("3 s", Duration::from_secs(3)),
+        ];
+        for (src, expected) in cases {
+            assert_eq!(parse_duration(src).unwrap(), expected, "{src:?}");
+        }
     }
 
     #[test]
-    fn test_parse_duration_minutes() {
-        assert_eq!(parse_duration("1m").unwrap(), Duration::from_secs(60));
-        assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
+    fn rejects_invalid_durations() {
+        for src in ["", "abc", "-1s"] {
+            assert!(parse_duration(src).is_err(), "{src:?} should be rejected");
+        }
     }
 
     #[test]
-    fn test_parse_duration_hours() {
-        assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
-        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
-    }
-
-    #[test]
-    fn test_parse_duration_milliseconds() {
-        assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
-        assert_eq!(
-            parse_duration("1000ms").unwrap(),
-            Duration::from_millis(1000)
-        );
-    }
-
-    #[test]
-    fn test_parse_duration_no_suffix() {
-        assert_eq!(parse_duration("10").unwrap(), Duration::from_secs(10));
-    }
-
-    #[test]
-    fn test_parse_duration_with_whitespace() {
-        assert_eq!(parse_duration(" 3s ").unwrap(), Duration::from_secs(3));
-        assert_eq!(parse_duration("3 s").unwrap(), Duration::from_secs(3));
-    }
-
-    #[test]
-    fn test_parse_duration_invalid() {
-        assert!(parse_duration("").is_err());
-        assert!(parse_duration("abc").is_err());
-        assert!(parse_duration("-1s").is_err());
-    }
-
-    #[test]
-    fn test_throttle_cleanup_stale_entries() {
+    fn cleanup_removes_stale_entries() {
         let mut throttle = Throttle::new(Duration::from_millis(10));
 
         assert!(throttle.should_emit(MAC1));
@@ -368,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn test_throttle_cleanup_preserves_recent_entries() {
+    fn cleanup_preserves_recent_entries() {
         let mut throttle = Throttle::new(Duration::from_millis(10));
 
         assert!(throttle.should_emit(MAC1));
@@ -382,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn test_throttle_cleanup_zero_interval() {
+    fn cleanup_is_noop_for_zero_interval() {
         let mut throttle = Throttle::new(Duration::ZERO);
 
         assert!(throttle.should_emit(MAC1));
@@ -396,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn test_throttle_periodic_cleanup() {
+    fn periodic_cleanup_removes_stale_entries() {
         let mut throttle = Throttle::new(Duration::from_millis(10));
 
         let old_time = Instant::now() - Duration::from_millis(200);
@@ -419,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn test_throttle_no_cleanup_below_size_threshold() {
+    fn no_cleanup_below_size_threshold() {
         let mut throttle = Throttle::new(Duration::from_millis(10));
 
         let old_time = Instant::now() - Duration::from_millis(200);
@@ -442,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn test_throttle_cleanup_empty_map() {
+    fn cleanup_on_empty_map_is_noop() {
         let mut throttle = Throttle::new(Duration::from_secs(1));
 
         // Cleanup on empty map should not panic
