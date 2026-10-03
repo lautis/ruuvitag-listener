@@ -232,6 +232,9 @@ fn drain_shutdown_warnings(
 ///   and the scan is stopped gracefully so the backend can do its configured
 ///   shutdown cleanup (the HCI backend disables the adapter's LE scan only
 ///   with [`ScanExitBehavior::Always`]) before the process exits.
+/// - When the backend closes the measurement stream on its own (it died),
+///   warnings are still drained, then a [`ScanError::Bluetooth`] is returned
+///   so supervisors see a failure instead of a clean exit.
 pub async fn run_with_io(
     options: Options,
     scanner: &impl Scanner,
@@ -270,6 +273,10 @@ pub async fn run_with_io(
     // long as the scan runs, which is every run of a backend that has no
     // warnings to send.
     let mut warnings_open = true;
+    // Set when the backend closes the measurement stream without being asked
+    // to stop. Backends keep the stream open for the whole session, so a close
+    // means the backend task died (bluetoothd restarted, adapter removed).
+    let mut scan_ended = false;
 
     loop {
         tokio::select! {
@@ -286,8 +293,13 @@ pub async fn run_with_io(
                         }
                     }
                 },
-                // All senders dropped: the scan ended on its own.
-                None => break,
+                // The backend closed the stream without being asked to stop:
+                // report it as an error after shutdown so supervisors
+                // (systemd, Telegraf) see a failure instead of exit 0.
+                None => {
+                    scan_ended = true;
+                    break;
+                }
             },
             warning = session.warnings.recv(), if warnings_open => match warning {
                 Some(warning) => report_warning(err, warning)?,
@@ -309,6 +321,14 @@ pub async fn run_with_io(
     // backend emitted while it was stopping (e.g. a failed LE scan disable).
     drain_shutdown_warnings(&mut session.warnings, err)?;
 
+    if scan_ended {
+        return Err(ScanError::Bluetooth(
+            "scan ended unexpectedly: the Bluetooth backend stopped without being asked"
+                .to_string(),
+        )
+        .into());
+    }
+
     Ok(())
 }
 
@@ -316,8 +336,8 @@ pub async fn run_with_io(
 mod tests {
     use super::*;
     use crate::mac_address::MacAddress;
-    use crate::scanner::{DecodeError, MeasurementResult};
-    use std::sync::Mutex;
+    use crate::scanner::{DecodeError, MeasurementResult, ScanError};
+    use parking_lot::Mutex;
     use std::time::{Duration, SystemTime};
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
@@ -325,15 +345,16 @@ mod tests {
     #[derive(Debug, Default)]
     struct ConfigCapturingScanner {
         seen: Mutex<Option<ScanConfig>>,
+        // Held open so the stream stays alive: the run loop must end via the
+        // stop signal (returning `Ok`), not via an unexpected stream close.
+        hold: Mutex<Option<mpsc::Sender<MeasurementResult>>>,
     }
 
     impl Scanner for ConfigCapturingScanner {
         async fn start_scan(&self, config: ScanConfig) -> Result<ScanSession, ScanError> {
-            *self.seen.lock().unwrap() = Some(config);
-            // No measurements, and the sender is dropped straight away so
-            // the run loop ends on its own.
+            *self.seen.lock() = Some(config);
             let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
-            drop(tx);
+            *self.hold.lock() = Some(tx);
             Ok(ScanSession::unmanaged(rx))
         }
     }
@@ -353,7 +374,7 @@ mod tests {
 
     impl Scanner for FakeScanner {
         async fn start_scan(&self, _config: ScanConfig) -> Result<ScanSession, ScanError> {
-            let results = self.results.lock().unwrap().clone();
+            let results = self.results.lock().clone();
             let (tx, rx) = mpsc::channel::<MeasurementResult>(results.len().max(1));
             tokio::spawn(async move {
                 for r in results {
@@ -396,7 +417,6 @@ mod tests {
             luminosity: None,
         }
     }
-
     async fn run_test(
         options: Options,
         scanner: &impl Scanner,
@@ -407,6 +427,28 @@ mod tests {
         run_with_io(options, scanner, &mut out, &mut err, stop)
             .await
             .unwrap();
+        (
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
+    }
+
+    /// Feed a scan whose stream closes on its own (a dying backend) and return
+    /// its output. Expects the unexpected-end error: whatever arrived before
+    /// the close must still be written, and the error surfaces via the return
+    /// value (the binary prints it), not `err`.
+    async fn run_closed_scan(options: Options, scanner: &impl Scanner) -> (String, String) {
+        let mut out = Vec::<u8>::new();
+        let mut err = Vec::<u8>::new();
+        let result =
+            run_with_io(options, scanner, &mut out, &mut err, std::future::pending()).await;
+        match result {
+            Err(RunError::Scan(ScanError::Bluetooth(message))) => assert!(
+                message.contains("scan ended unexpectedly"),
+                "wrong scan error: {message:?}"
+            ),
+            other => panic!("expected unexpected-end scan error, got {other:?}"),
+        }
         (
             String::from_utf8(out).unwrap(),
             String::from_utf8(err).unwrap(),
@@ -482,7 +524,7 @@ mod tests {
         let scanner = ConfigCapturingScanner::default();
         run_test(options, &scanner, std::future::ready(())).await;
 
-        let seen = scanner.seen.lock().unwrap().clone();
+        let seen = scanner.seen.lock().clone();
         let seen = seen.expect("the scanner was started");
         assert_eq!(seen.backend, Backend::Hci);
         assert!(seen.verbose);
@@ -501,6 +543,17 @@ mod tests {
         // immediately and `run_with_io` must return cleanly.
         let (out, err) = run_test(Options::default(), &scanner, std::future::ready(())).await;
 
+        assert!(out.is_empty());
+        assert!(err.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scan_ending_on_its_own_is_an_error() {
+        // A backend that closes the stream without being asked (bluetoothd
+        // restarted, adapter removed): supervisors must see a failure, not a
+        // clean exit. `FakeScanner` drops the sender after delivering its
+        // results, which is exactly that shape.
+        let (out, err) = run_closed_scan(Options::default(), &FakeScanner::new(vec![])).await;
         assert!(out.is_empty());
         assert!(err.is_empty());
     }
@@ -577,7 +630,7 @@ mod tests {
 
         let scanner = FakeScanner::new(vec![Ok(m)]);
 
-        let (out, err) = run_test(Options::default(), &scanner, std::future::pending()).await;
+        let (out, err) = run_closed_scan(Options::default(), &scanner).await;
 
         assert!(err.is_empty());
 
@@ -600,7 +653,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (out, _) = run_test(options, &scanner, std::future::pending()).await;
+        let (out, _) = run_closed_scan(options, &scanner).await;
 
         // only first should pass (no waiting in test, so second is within interval)
         assert_eq!(out.lines().count(), 1);
@@ -773,7 +826,7 @@ mod tests {
             Ok(measurement_with_format(mac, ts, Format::V6)),
         ]);
 
-        let (out, _) = run_test(Options::default(), &scanner, std::future::pending()).await;
+        let (out, _) = run_closed_scan(Options::default(), &scanner).await;
 
         assert_eq!(out.lines().count(), 2);
     }
@@ -797,7 +850,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (out, _) = run_test(options, &scanner, std::future::pending()).await;
+        let (out, _) = run_closed_scan(options, &scanner).await;
 
         assert!(out.contains("name=Sauna"));
         assert!(!out.contains("11:22:33:44:55:66"));
@@ -813,14 +866,14 @@ mod tests {
         let base = Options::default();
 
         // non-verbose: nothing written
-        let (out, err) = run_test(base.clone(), &scanner, std::future::pending()).await;
+        let (out, err) = run_closed_scan(base.clone(), &scanner).await;
         assert!(out.is_empty());
         assert!(err.is_empty());
 
         // verbose: error is written to err
         let mut verbose = base;
         verbose.verbose = true;
-        let (out, err) = run_test(verbose, &scanner, std::future::pending()).await;
+        let (out, err) = run_closed_scan(verbose, &scanner).await;
 
         assert!(out.is_empty());
         assert!(err.contains("Invalid data: bad packet"));
@@ -838,7 +891,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (out, _) = run_test(options, &scanner, std::future::pending()).await;
+        let (out, _) = run_closed_scan(options, &scanner).await;
 
         let mut lines = out.lines();
         let header = lines.next().unwrap();
@@ -860,7 +913,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (out, _) = run_test(options, &scanner, std::future::pending()).await;
+        let (out, _) = run_closed_scan(options, &scanner).await;
 
         let line = out.trim_end();
         assert!(line.starts_with("{\"mac\":\"AA:BB:CC:DD:EE:FF\""));
@@ -960,7 +1013,7 @@ mod tests {
             let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
             // Keep the scan alive for the whole test; `unmanaged` drops the
             // warnings sender, so its channel is closed from the start.
-            *self.hold.lock().unwrap() = Some(tx);
+            *self.hold.lock() = Some(tx);
             Ok(ScanSession::unmanaged(rx))
         }
     }
