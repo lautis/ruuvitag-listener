@@ -27,4 +27,4 @@ pub use scanner::{
     Backend, DecodeError, MeasurementResult, ScanConfig, ScanError, ScanExitBehavior, ScanSession,
     decode_ruuvi_data,
 };
-pub use throttle::{Throttle, parse_duration};
+pub use throttle::{ParseDurationError, Throttle, parse_duration};
