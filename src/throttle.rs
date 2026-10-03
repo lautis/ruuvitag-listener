@@ -114,68 +114,154 @@ impl Throttle {
     }
 }
 
+/// Error returned when a duration string fails to parse.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ParseDurationError {
+    /// The input was empty or contained only whitespace.
+    #[error("empty duration")]
+    Empty,
+    /// A segment was not a non-negative integer followed by a unit.
+    #[error("invalid number `{token}`")]
+    InvalidNumber { token: String },
+    /// A unit was not one of `h`, `m`, `s`, or `ms`.
+    #[error("unknown unit `{token}`")]
+    UnknownUnit { token: String },
+    /// A segment in a compound duration was missing its unit.
+    #[error("missing unit after `{token}`")]
+    MissingUnit { token: String },
+    /// The duration exceeds the range of [`std::time::Duration`].
+    #[error("duration overflows")]
+    Overflow,
+}
+
 /// Parse a duration from a human-readable string.
 ///
-/// Supports the following suffixes:
-/// - `s` or no suffix: seconds
-/// - `m`: minutes
+/// Supports a single value with an optional suffix, or a compound
+/// expression of several values:
 /// - `h`: hours
+/// - `m`: minutes
+/// - `s`: seconds (also the default without a suffix)
 /// - `ms`: milliseconds
+///
+/// Whitespace may appear between the digits and the unit, and between
+/// components. A bare number without a unit is only interpreted as
+/// seconds when it is the entire input; in a compound expression every
+/// component must carry a unit.
 ///
 /// # Examples
 /// ```
 /// use ruuvitag_listener::throttle::parse_duration;
+/// use ruuvitag_listener::throttle::ParseDurationError;
 /// use std::time::Duration;
 ///
 /// assert_eq!(parse_duration("3s").unwrap(), Duration::from_secs(3));
 /// assert_eq!(parse_duration("1m").unwrap(), Duration::from_secs(60));
 /// assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
+/// assert_eq!(parse_duration("1h30m").unwrap(), Duration::from_secs(5400));
+/// assert_eq!(parse_duration("1h 30m").unwrap(), Duration::from_secs(5400));
+/// assert_eq!(parse_duration("10").unwrap(), Duration::from_secs(10));
+/// assert_eq!(
+///     parse_duration("1h30"),
+///     Err(ParseDurationError::MissingUnit { token: "30".to_string() })
+/// );
 /// ```
-pub fn parse_duration(src: &str) -> Result<Duration, String> {
-    let src = src.trim();
+pub fn parse_duration(src: &str) -> Result<Duration, ParseDurationError> {
+    let trimmed = src.trim();
 
-    if src.is_empty() {
-        return Err("empty duration string".to_string());
+    if trimmed.is_empty() {
+        return Err(ParseDurationError::Empty);
     }
 
-    // Try parsing with different suffixes
-    if let Some(num) = src.strip_suffix("ms") {
-        let millis: u64 = num
-            .trim()
-            .parse()
-            .map_err(|_| format!("invalid milliseconds: {}", num))?;
-        return Ok(Duration::from_millis(millis));
+    let mut total = Duration::ZERO;
+    let mut rest = trimmed;
+    let mut first = true;
+
+    while !rest.is_empty() {
+        rest = rest.trim_start_matches([' ', '\t']);
+        if rest.is_empty() {
+            break;
+        }
+
+        let digits_len = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits_len == 0 {
+            let token = rest.split_whitespace().next().unwrap_or(rest);
+            return Err(ParseDurationError::InvalidNumber {
+                token: token.to_string(),
+            });
+        }
+
+        // Whitespace between the digits and the unit is allowed.
+        let after_digits = &rest[digits_len..];
+        let gap_len = after_digits
+            .chars()
+            .take_while(|c| matches!(c, ' ' | '\t'))
+            .count();
+        let unit_start = digits_len + gap_len;
+        let unit_len = rest[unit_start..]
+            .chars()
+            .take_while(|c| c.is_ascii_lowercase())
+            .count();
+        let unit = &rest[unit_start..unit_start + unit_len];
+        let remainder = &rest[unit_start + unit_len..];
+
+        let component = if unit.is_empty() {
+            if first && remainder.chars().all(char::is_whitespace) {
+                // A bare number for the entire input is seconds.
+                // The token is all ASCII digits, so a parse failure is
+                // magnitude overflow.
+                let secs: u64 = rest[..digits_len]
+                    .parse()
+                    .map_err(|_| ParseDurationError::Overflow)?;
+                Duration::new(secs, 0)
+            } else if remainder.starts_with([' ', '\t'])
+                || remainder.is_empty()
+                || remainder.starts_with(|c: char| c.is_ascii_digit())
+            {
+                return Err(ParseDurationError::MissingUnit {
+                    token: rest[..digits_len].to_string(),
+                });
+            } else {
+                // Non-digit junk right after the digits, e.g. `1.5s`.
+                let token = rest.split_whitespace().next().unwrap_or(rest);
+                return Err(ParseDurationError::InvalidNumber {
+                    token: token.to_string(),
+                });
+            }
+        } else {
+            // The token digits are all ASCII digits, so a parse failure
+            // is magnitude overflow.
+            let digits: u64 = rest[..digits_len]
+                .parse()
+                .map_err(|_| ParseDurationError::Overflow)?;
+            match unit {
+                "h" => Duration::new(
+                    digits
+                        .checked_mul(3600)
+                        .ok_or(ParseDurationError::Overflow)?,
+                    0,
+                ),
+                "m" => Duration::new(
+                    digits.checked_mul(60).ok_or(ParseDurationError::Overflow)?,
+                    0,
+                ),
+                "s" => Duration::new(digits, 0),
+                "ms" => Duration::new(digits / 1000, (digits % 1000 * 1_000_000) as u32),
+                _ => {
+                    return Err(ParseDurationError::UnknownUnit {
+                        token: rest[..digits_len + unit_len].to_string(),
+                    });
+                }
+            }
+        };
+
+        first = false;
+        total = total
+            .checked_add(component)
+            .ok_or(ParseDurationError::Overflow)?;
+        rest = remainder;
     }
 
-    if let Some(num) = src.strip_suffix('h') {
-        let hours: u64 = num
-            .trim()
-            .parse()
-            .map_err(|_| format!("invalid hours: {}", num))?;
-        return Ok(Duration::from_secs(hours * 3600));
-    }
-
-    if let Some(num) = src.strip_suffix('m') {
-        let minutes: u64 = num
-            .trim()
-            .parse()
-            .map_err(|_| format!("invalid minutes: {}", num))?;
-        return Ok(Duration::from_secs(minutes * 60));
-    }
-
-    if let Some(num) = src.strip_suffix('s') {
-        let secs: u64 = num
-            .trim()
-            .parse()
-            .map_err(|_| format!("invalid seconds: {}", num))?;
-        return Ok(Duration::from_secs(secs));
-    }
-
-    // No suffix, treat as seconds
-    let secs: u64 = src
-        .parse()
-        .map_err(|_| format!("invalid duration: {}", src))?;
-    Ok(Duration::from_secs(secs))
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -292,6 +378,7 @@ mod tests {
             ("3s", Duration::from_secs(3)),
             ("30s", Duration::from_secs(30)),
             ("0s", Duration::from_secs(0)),
+            ("0", Duration::from_secs(0)),
             ("1m", Duration::from_secs(60)),
             ("5m", Duration::from_secs(300)),
             ("1h", Duration::from_secs(3600)),
@@ -301,6 +388,12 @@ mod tests {
             ("10", Duration::from_secs(10)),
             (" 3s ", Duration::from_secs(3)),
             ("3 s", Duration::from_secs(3)),
+            ("1h30m", Duration::from_secs(5400)),
+            ("1h 30m", Duration::from_secs(5400)),
+            ("2m500ms", Duration::from_millis(120_500)),
+            ("90s", Duration::from_secs(90)),
+            ("1h30m10s", Duration::from_secs(5410)),
+            ("1h\t30m", Duration::from_secs(5400)),
         ];
         for (src, expected) in cases {
             assert_eq!(parse_duration(src).unwrap(), expected, "{src:?}");
@@ -309,8 +402,89 @@ mod tests {
 
     #[test]
     fn rejects_invalid_durations() {
-        for src in ["", "abc", "-1s"] {
-            assert!(parse_duration(src).is_err(), "{src:?} should be rejected");
+        use ParseDurationError::*;
+
+        let cases = [
+            ("", Empty),
+            ("   ", Empty),
+            (
+                "abc",
+                InvalidNumber {
+                    token: "abc".to_string(),
+                },
+            ),
+            (
+                "1.5s",
+                InvalidNumber {
+                    token: "1.5s".to_string(),
+                },
+            ),
+            (
+                "-5s",
+                InvalidNumber {
+                    token: "-5s".to_string(),
+                },
+            ),
+            (
+                "1h30",
+                MissingUnit {
+                    token: "30".to_string(),
+                },
+            ),
+            (
+                "1h 30",
+                MissingUnit {
+                    token: "30".to_string(),
+                },
+            ),
+            (
+                "5x",
+                UnknownUnit {
+                    token: "5x".to_string(),
+                },
+            ),
+            (
+                "5min",
+                UnknownUnit {
+                    token: "5min".to_string(),
+                },
+            ),
+            ("99999999999999999999h", Overflow),
+            ("18446744073709551616s", Overflow),
+        ];
+        for (src, expected) in cases {
+            assert_eq!(parse_duration(src), Err(expected), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn overflow_components_sum_to_overflow() {
+        use ParseDurationError::*;
+
+        assert_eq!(
+            parse_duration("9223372036854775808h 9223372036854775808h"),
+            Err(Overflow)
+        );
+        assert_eq!(parse_duration("18446744073709551615s1s"), Err(Overflow));
+        // Each component fits, but the sum overflows.
+        assert_eq!(
+            parse_duration("99999999999999999999h")
+                .unwrap_err()
+                .to_string(),
+            "duration overflows"
+        );
+    }
+
+    #[test]
+    fn overflow_does_not_panic_in_debug() {
+        // Huge values exercise checked arithmetic without panicking.
+        for src in [
+            "99999999999999999999h",
+            "18446744073709551616s",
+            "18446744073709551615m",
+            "18446744073709551615s1s",
+        ] {
+            assert_eq!(parse_duration(src), Err(ParseDurationError::Overflow));
         }
     }
 

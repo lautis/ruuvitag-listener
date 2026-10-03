@@ -59,8 +59,8 @@ pub struct Options {
     pub verbose: bool,
 
     /// Throttle events per tag to at most one per interval.
-    /// Accepts duration with suffix: 3s, 1m, 500ms, 2h.
-    /// Without suffix, value is interpreted as seconds.
+    /// Accepts durations like 3s, 1m, 500ms, 2h, or compound values such
+    /// as 1h30m. Without suffix, a single value is interpreted as seconds.
     #[arg(long, value_parser = crate::throttle::parse_duration)]
     pub throttle: Option<Duration>,
 
