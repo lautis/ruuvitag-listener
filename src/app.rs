@@ -553,25 +553,7 @@ mod tests {
         // restarted, adapter removed): supervisors must see a failure, not a
         // clean exit. `FakeScanner` drops the sender after delivering its
         // results, which is exactly that shape.
-        let scanner = FakeScanner::new(vec![]);
-        let mut out = Vec::<u8>::new();
-        let mut err = Vec::<u8>::new();
-        let result = run_with_io(
-            Options::default(),
-            &scanner,
-            &mut out,
-            &mut err,
-            std::future::pending(),
-        )
-        .await;
-        let message = match result {
-            Err(RunError::Scan(ScanError::Bluetooth(message))) => message,
-            other => panic!("expected unexpected-end scan error, got {other:?}"),
-        };
-        assert!(
-            message.contains("scan ended unexpectedly"),
-            "wrong scan error: {message:?}"
-        );
+        let (out, err) = run_closed_scan(Options::default(), &FakeScanner::new(vec![])).await;
         assert!(out.is_empty());
         assert!(err.is_empty());
     }
