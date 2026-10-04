@@ -4,6 +4,7 @@
 //! volume when tags broadcast frequently but data changes slowly.
 
 use crate::mac_address::MacAddress;
+use jiff::SignedDuration;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -114,68 +115,81 @@ impl Throttle {
     }
 }
 
+/// Error returned when a duration string fails to parse.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ParseDurationError {
+    /// The input was empty or contained only whitespace.
+    #[error("empty duration")]
+    Empty,
+    /// The input was not a valid duration. The message is jiff's parse
+    /// diagnostic, e.g. an unknown unit or a missing unit designator.
+    #[error("invalid duration: {message}")]
+    Invalid { message: String },
+    /// The parsed duration was negative, but an interval cannot be.
+    #[error("duration must not be negative")]
+    Negative,
+}
+
 /// Parse a duration from a human-readable string.
 ///
-/// Supports the following suffixes:
-/// - `s` or no suffix: seconds
-/// - `m`: minutes
-/// - `h`: hours
-/// - `ms`: milliseconds
+/// Parsing is delegated to jiff, which accepts its "friendly" duration
+/// format as well as ISO 8601 durations:
+///
+/// - Units up to hours: `h`, `m`, `s`, `ms`, `us`/`µs`, `ns`, including
+///   longer designators like `sec`, `min` or `hours`.
+/// - Compound values, ordered from largest to smallest unit: `1h30m`,
+///   `2m500ms`.
+/// - Whitespace (and commas) between components and between a number and
+///   its unit: `1h 30m`, `3 s`.
+/// - Fractional values carry to the next smaller unit: `1.5h` is 90
+///   minutes.
+/// - ISO 8601 durations: `PT2H30M`.
+/// - A bare number is seconds, for backwards compatibility: `10`.
+///
+/// Calendar units (`1d`, `1w`, `1mo`, `1y`) have no fixed length and are
+/// rejected, as are negative durations.
 ///
 /// # Examples
 /// ```
-/// use ruuvitag_listener::throttle::parse_duration;
+/// use ruuvitag_listener::throttle::{parse_duration, ParseDurationError};
 /// use std::time::Duration;
 ///
 /// assert_eq!(parse_duration("3s").unwrap(), Duration::from_secs(3));
 /// assert_eq!(parse_duration("1m").unwrap(), Duration::from_secs(60));
 /// assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
+/// assert_eq!(parse_duration("1h30m").unwrap(), Duration::from_secs(5400));
+/// assert_eq!(parse_duration("1h 30m").unwrap(), Duration::from_secs(5400));
+/// assert_eq!(parse_duration("10").unwrap(), Duration::from_secs(10));
+/// assert_eq!(parse_duration("PT2H30M").unwrap(), Duration::from_secs(9000));
+/// assert!(parse_duration("1h30").is_err());
+/// assert!(parse_duration("1d").is_err());
+/// assert_eq!(parse_duration("-5s"), Err(ParseDurationError::Negative));
 /// ```
-pub fn parse_duration(src: &str) -> Result<Duration, String> {
-    let src = src.trim();
+pub fn parse_duration(src: &str) -> Result<Duration, ParseDurationError> {
+    let trimmed = src.trim();
 
-    if src.is_empty() {
-        return Err("empty duration string".to_string());
+    if trimmed.is_empty() {
+        return Err(ParseDurationError::Empty);
     }
 
-    // Try parsing with different suffixes
-    if let Some(num) = src.strip_suffix("ms") {
-        let millis: u64 = num
-            .trim()
+    // Bare numbers are seconds, for backwards compatibility. The digit
+    // check keeps `+10` out of the `u64` fallback; jiff rejects it.
+    if trimmed.starts_with(|c: char| c.is_ascii_digit())
+        && let Ok(secs) = trimmed.parse::<u64>()
+    {
+        return Ok(Duration::new(secs, 0));
+    }
+
+    let duration: SignedDuration =
+        trimmed
             .parse()
-            .map_err(|_| format!("invalid milliseconds: {}", num))?;
-        return Ok(Duration::from_millis(millis));
-    }
+            .map_err(|e: jiff::Error| ParseDurationError::Invalid {
+                message: e.to_string(),
+            })?;
 
-    if let Some(num) = src.strip_suffix('h') {
-        let hours: u64 = num
-            .trim()
-            .parse()
-            .map_err(|_| format!("invalid hours: {}", num))?;
-        return Ok(Duration::from_secs(hours * 3600));
-    }
-
-    if let Some(num) = src.strip_suffix('m') {
-        let minutes: u64 = num
-            .trim()
-            .parse()
-            .map_err(|_| format!("invalid minutes: {}", num))?;
-        return Ok(Duration::from_secs(minutes * 60));
-    }
-
-    if let Some(num) = src.strip_suffix('s') {
-        let secs: u64 = num
-            .trim()
-            .parse()
-            .map_err(|_| format!("invalid seconds: {}", num))?;
-        return Ok(Duration::from_secs(secs));
-    }
-
-    // No suffix, treat as seconds
-    let secs: u64 = src
-        .parse()
-        .map_err(|_| format!("invalid duration: {}", src))?;
-    Ok(Duration::from_secs(secs))
+    // The only failure mode is a negative duration: every non-negative
+    // `SignedDuration` fits into a `std::time::Duration`.
+    Duration::try_from(duration).map_err(|_| ParseDurationError::Negative)
 }
 
 #[cfg(test)]
@@ -292,6 +306,7 @@ mod tests {
             ("3s", Duration::from_secs(3)),
             ("30s", Duration::from_secs(30)),
             ("0s", Duration::from_secs(0)),
+            ("0", Duration::from_secs(0)),
             ("1m", Duration::from_secs(60)),
             ("5m", Duration::from_secs(300)),
             ("1h", Duration::from_secs(3600)),
@@ -301,6 +316,19 @@ mod tests {
             ("10", Duration::from_secs(10)),
             (" 3s ", Duration::from_secs(3)),
             ("3 s", Duration::from_secs(3)),
+            ("1h30m", Duration::from_secs(5400)),
+            ("1h 30m", Duration::from_secs(5400)),
+            ("2m500ms", Duration::from_millis(120_500)),
+            ("90s", Duration::from_secs(90)),
+            ("1h30m10s", Duration::from_secs(5410)),
+            ("1h\t30m", Duration::from_secs(5400)),
+            // Also accepted by jiff beyond the pre-jiff syntax.
+            ("1h, 30m", Duration::from_secs(5400)),
+            ("5min", Duration::from_secs(300)),
+            ("0.5s", Duration::from_millis(500)),
+            ("1.5h", Duration::from_secs(5400)),
+            ("PT2H30M", Duration::from_secs(9000)),
+            ("100000s", Duration::from_secs(100_000)),
         ];
         for (src, expected) in cases {
             assert_eq!(parse_duration(src).unwrap(), expected, "{src:?}");
@@ -309,9 +337,38 @@ mod tests {
 
     #[test]
     fn rejects_invalid_durations() {
-        for src in ["", "abc", "-1s"] {
-            assert!(parse_duration(src).is_err(), "{src:?} should be rejected");
+        use ParseDurationError::*;
+
+        for src in ["", "   "] {
+            assert_eq!(parse_duration(src), Err(Empty), "{src:?}");
         }
+
+        // Malformed input; jiff's diagnostic is carried in `Invalid`.
+        for src in [
+            "abc",
+            "1h30",
+            "1h 30",
+            "5x",
+            "+10",
+            "1d",
+            "1w",
+            "1mo",
+            "1y",
+            "18446744073709551616s",
+            "99999999999999999999h",
+            "18446744073709551615m",
+            "18446744073709551615s1s",
+            "9223372036854775808h",
+            "99999999999999999999",
+        ] {
+            assert!(
+                matches!(parse_duration(src), Err(Invalid { .. })),
+                "{src:?}: {:?}",
+                parse_duration(src)
+            );
+        }
+
+        assert!(matches!(parse_duration("-5s"), Err(Negative)));
     }
 
     #[test]
