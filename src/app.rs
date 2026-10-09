@@ -337,7 +337,7 @@ mod tests {
     use super::*;
     use crate::mac_address::MacAddress;
     use crate::scanner::{DecodeError, MeasurementResult, ScanError};
-    use parking_lot::Mutex;
+    use std::sync::Mutex;
     use std::time::{Duration, SystemTime};
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
@@ -352,9 +352,9 @@ mod tests {
 
     impl Scanner for ConfigCapturingScanner {
         async fn start_scan(&self, config: ScanConfig) -> Result<ScanSession, ScanError> {
-            *self.seen.lock() = Some(config);
+            *self.seen.lock().expect("test mutex unpoisoned") = Some(config);
             let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
-            *self.hold.lock() = Some(tx);
+            *self.hold.lock().expect("test mutex unpoisoned") = Some(tx);
             Ok(ScanSession::unmanaged(rx))
         }
     }
@@ -374,7 +374,7 @@ mod tests {
 
     impl Scanner for FakeScanner {
         async fn start_scan(&self, _config: ScanConfig) -> Result<ScanSession, ScanError> {
-            let results = self.results.lock().clone();
+            let results = self.results.lock().expect("test mutex unpoisoned").clone();
             let (tx, rx) = mpsc::channel::<MeasurementResult>(results.len().max(1));
             tokio::spawn(async move {
                 for r in results {
@@ -524,7 +524,7 @@ mod tests {
         let scanner = ConfigCapturingScanner::default();
         run_test(options, &scanner, std::future::ready(())).await;
 
-        let seen = scanner.seen.lock().clone();
+        let seen = scanner.seen.lock().expect("test mutex unpoisoned").clone();
         let seen = seen.expect("the scanner was started");
         assert_eq!(seen.backend, Backend::Hci);
         assert!(seen.verbose);
@@ -1013,7 +1013,7 @@ mod tests {
             let (tx, rx) = mpsc::channel::<MeasurementResult>(1);
             // Keep the scan alive for the whole test; `unmanaged` drops the
             // warnings sender, so its channel is closed from the start.
-            *self.hold.lock() = Some(tx);
+            *self.hold.lock().expect("test mutex unpoisoned") = Some(tx);
             Ok(ScanSession::unmanaged(rx))
         }
     }
