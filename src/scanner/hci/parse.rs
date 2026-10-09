@@ -94,6 +94,17 @@ pub(crate) fn parse_extended_advertising_report(
 /// silently otherwise. A truncated AD payload cannot be resynchronised
 /// (the next report boundary is unknowable), so it ends the walk silently
 /// in both modes, preserving the single-report behaviour.
+/// Message for a report cut mid-header; shared by every truncation site so
+/// verbose errors stay identical.
+const REPORT_TOO_SHORT: &str = "Advertising report too short";
+
+/// Record a mid-header truncation when `verbose`; silent otherwise.
+fn push_truncated(results: &mut Vec<MeasurementResult>, verbose: bool) {
+    if verbose {
+        results.push(Err(DecodeError::InvalidData(REPORT_TOO_SHORT.into())));
+    }
+}
+
 fn parse_report(data: &[u8], verbose: bool, layout: ReportLayout) -> Vec<MeasurementResult> {
     let report = match data.get(HCI_EVENT_HEADER_LEN..) {
         Some(report) if !report.is_empty() => report,
@@ -110,11 +121,7 @@ fn parse_report(data: &[u8], verbose: bool, layout: ReportLayout) -> Vec<Measure
         let data_len_byte = match report.get(cursor + layout.data_len) {
             Some(b) => *b as usize,
             None => {
-                if verbose {
-                    results.push(Err(DecodeError::InvalidData(
-                        "Advertising report too short".into(),
-                    )));
-                }
+                push_truncated(&mut results, verbose);
                 break;
             }
         };
@@ -122,11 +129,7 @@ fn parse_report(data: &[u8], verbose: bool, layout: ReportLayout) -> Vec<Measure
         match report.get(cursor + layout.addr..cursor + layout.addr + 6) {
             Some(bytes) => addr.copy_from_slice(bytes),
             None => {
-                if verbose {
-                    results.push(Err(DecodeError::InvalidData(
-                        "Advertising report too short".into(),
-                    )));
-                }
+                push_truncated(&mut results, verbose);
                 break;
             }
         }
@@ -151,11 +154,7 @@ fn parse_report(data: &[u8], verbose: bool, layout: ReportLayout) -> Vec<Measure
             Rssi::Fixed(off) => match report.get(cursor + off) {
                 Some(b) => *b as i8,
                 None => {
-                    if verbose {
-                        results.push(Err(DecodeError::InvalidData(
-                            "Advertising report too short".into(),
-                        )));
-                    }
+                    push_truncated(&mut results, verbose);
                     break;
                 }
             },
@@ -177,13 +176,9 @@ fn parse_report(data: &[u8], verbose: bool, layout: ReportLayout) -> Vec<Measure
 
 /// Build the verbose-mode error for an advertising report too short to parse.
 fn too_short(verbose: bool) -> Vec<MeasurementResult> {
-    if verbose {
-        vec![Err(DecodeError::InvalidData(
-            "Advertising report too short".into(),
-        ))]
-    } else {
-        Vec::new()
-    }
+    let mut results = Vec::new();
+    push_truncated(&mut results, verbose);
+    results
 }
 
 /// Dispatch one HCI event: parse it as a legacy or extended advertising
@@ -302,32 +297,34 @@ mod tests {
         }
     }
 
-    // Build a full advertising report from `spec`.
+    // Build a full advertising report from `spec` by reusing the per-report
+    // body builders, so the wire encoding lives in one place. A claimed
+    // `data_len` patches the length byte without changing the AD bytes,
+    // modelling a truncated overrun.
     fn report(spec: ReportSpec) -> Vec<u8> {
         let extended = spec.subevent == EVT_LE_EXTENDED_ADVERTISING_REPORT;
-        let ad = spec.ad;
-        let data_len = spec.data_len.unwrap_or(ad.len() as u8);
-        let mut pkt = vec![HCI_EVENT_PKT, spec.event_code, 0x00, spec.subevent];
-        pkt.push(spec.num_reports);
-        pkt.push(0x00); // event_type
-        if extended {
-            pkt.push(0x00); // event_type (2nd byte, LE)
-            pkt.push(0x00); // address_type
-            pkt.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]); // address (LE)
-            // primary/secondary phy, sid, tx_power, rssi
-            pkt.extend_from_slice(&[0x01, 0x01, 0x00, 0x7F, spec.rssi]);
-            pkt.extend_from_slice(&[0x00, 0x00]); // periodic interval
-            pkt.push(0x00); // direct_address_type
-            pkt.extend_from_slice(&[0x00; 6]); // direct_address
+        const ADDR_LE: [u8; 6] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
+        let mut body = if extended {
+            extended_body(ADDR_LE, spec.ad, spec.rssi)
         } else {
-            pkt.push(0x00); // address_type
-            pkt.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]); // address (LE)
+            legacy_body(ADDR_LE, spec.ad, spec.rssi)
+        };
+        if let Some(data_len) = spec.data_len {
+            let off = if extended {
+                EXTENDED_REPORT.data_len
+            } else {
+                LEGACY_REPORT.data_len
+            };
+            body[off] = data_len;
         }
-        pkt.push(data_len);
-        pkt.extend_from_slice(ad);
-        if !extended {
-            pkt.push(spec.rssi); // trailing RSSI byte
-        }
+        let mut pkt = vec![
+            HCI_EVENT_PKT,
+            spec.event_code,
+            0x00,
+            spec.subevent,
+            spec.num_reports,
+        ];
+        pkt.extend_from_slice(&body);
         pkt
     }
 
@@ -361,9 +358,7 @@ mod tests {
     fn assert_too_short(parse: fn(&[u8], bool) -> Vec<MeasurementResult>, pkt: &[u8]) {
         assert_eq!(
             parse(pkt, true),
-            vec![Err(DecodeError::InvalidData(
-                "Advertising report too short".into()
-            ))]
+            vec![Err(DecodeError::InvalidData(REPORT_TOO_SHORT.into()))]
         );
     }
 
@@ -608,6 +603,19 @@ mod tests {
         }
     }
 
+    // Check a stacked packet decodes to the two fixture tags (-80, -61 dBm).
+    fn assert_two_ruuvi(pkt: &[u8]) {
+        assert!(might_be_ruuvi(pkt));
+        let results = parse_event(pkt, false);
+        assert_eq!(results.len(), 2, "both stacked reports should decode");
+        let first = results[0].as_ref().expect("first should decode");
+        assert_eq!(first.mac, MacAddress([0x06, 0x05, 0x04, 0x03, 0x02, 0x01]));
+        assert_eq!(first.rssi, Some(-80));
+        let second = results[1].as_ref().expect("second should decode");
+        assert_eq!(second.mac, MacAddress([0x0F, 0x0E, 0x0D, 0x0C, 0x0B, 0x0A]));
+        assert_eq!(second.rssi, Some(-61));
+    }
+
     #[test]
     fn decodes_stacked_legacy_reports() {
         // Two Ruuvi reports with different AD lengths: the cursor must stride
@@ -624,15 +632,7 @@ mod tests {
                 legacy_body([0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F], long_ad, 0xC3),
             ],
         );
-        assert!(might_be_ruuvi(&pkt));
-        let results = parse_event(&pkt, false);
-        assert_eq!(results.len(), 2, "both stacked reports should decode");
-        let first = results[0].as_ref().expect("first should decode");
-        assert_eq!(first.mac, MacAddress([0x06, 0x05, 0x04, 0x03, 0x02, 0x01]));
-        assert_eq!(first.rssi, Some(-80));
-        let second = results[1].as_ref().expect("second should decode");
-        assert_eq!(second.mac, MacAddress([0x0F, 0x0E, 0x0D, 0x0C, 0x0B, 0x0A]));
-        assert_eq!(second.rssi, Some(-61));
+        assert_two_ruuvi(&pkt);
     }
 
     #[test]
@@ -645,15 +645,7 @@ mod tests {
                 extended_body([0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F], RUUVI_AD, 0xC3),
             ],
         );
-        assert!(might_be_ruuvi(&pkt));
-        let results = parse_event(&pkt, false);
-        assert_eq!(results.len(), 2, "both stacked reports should decode");
-        let first = results[0].as_ref().expect("first should decode");
-        assert_eq!(first.mac, MacAddress([0x06, 0x05, 0x04, 0x03, 0x02, 0x01]));
-        assert_eq!(first.rssi, Some(-80));
-        let second = results[1].as_ref().expect("second should decode");
-        assert_eq!(second.mac, MacAddress([0x0F, 0x0E, 0x0D, 0x0C, 0x0B, 0x0A]));
-        assert_eq!(second.rssi, Some(-61));
+        assert_two_ruuvi(&pkt);
     }
 
     #[test]
@@ -679,9 +671,7 @@ mod tests {
         assert!(loud[0].is_ok());
         assert_eq!(
             loud[1],
-            Err(DecodeError::InvalidData(
-                "Advertising report too short".into()
-            ))
+            Err(DecodeError::InvalidData(REPORT_TOO_SHORT.into()))
         );
     }
 }
