@@ -90,14 +90,13 @@ async fn drain_events(
             }
         };
 
-        // Parse any Ruuvi advertising report in this event; parse_event drops
+        // Parse any Ruuvi advertising reports in this event; parse_event drops
         // everything that is not one (non-LE-Meta-Events, non-Ruuvi payloads,
-        // unknown subevents).
-        if let Some(result) = parse_event(&buf[..n], verbose)
-            && (result.is_ok() || verbose)
-            && tx.send(result).await.is_err()
-        {
-            return false; // consumer gone, stop scanning
+        // unknown subevents) and decodes every stacked report in the event.
+        for result in parse_event(&buf[..n], verbose) {
+            if (result.is_ok() || verbose) && tx.send(result).await.is_err() {
+                return false; // consumer gone, stop scanning
+            }
         }
     }
 }
